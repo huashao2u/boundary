@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "required": [
+    "semantic_tags",
+    "meta_reflection",
+    "recommended_action",
+    "rationale"
+  ],
+  "properties": {
+    "semantic_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "meta_reflection": {
+      "type": "string"
+    },
+    "recommended_action": {
+      "type": "string",
+      "enum": [
+        "ANSWER",
+        "SEARCH",
+        "CALCULATE",
+        "CLARIFY",
+        "REFUSE"
+      ]
+    },
+    "rationale": {
+      "type": "string"
+    }
+  }
+}
+

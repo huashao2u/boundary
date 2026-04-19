@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcagent-boundary"
+version = "0.1.0"
+description = "Boundary-focused Step-DPO training pipeline with an in-repo shared mcagent_core layer."
+requires-python = ">=3.10"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mcagent_boundary*", "mcagent_core*"]

@@ -1,0 +1,70 @@
+action_space:
+  - ANSWER
+  - SEARCH
+  - CALCULATE
+  - CLARIFY
+  - REFUSE
+
+scoring:
+  lambda_tool: 0.10
+  lambda_calc: 0.05
+  lambda_clar: 0.10
+  answer_correct: 1.0
+  answer_wrong: -1.0
+  refuse_justified: 0.4
+  refuse_unjustified: -0.6
+  search_helpful: 0.6
+  search_unhelpful: -0.1
+  calculate_helpful: 0.6
+  calculate_unhelpful: -0.1
+  clarify_helpful: 0.5
+  clarify_unhelpful: -0.1
+
+mining:
+  min_delta_u: 0.5
+  competition_window: 0.35
+  anchor_margin: 0.5
+  max_boundary_candidates: 4000
+  max_clear_answer_anchors: 250
+  max_clear_external_anchors: 250
+
+warmup:
+  enable_if_non_answer_rate_below: 0.15
+  min_examples: 500
+  max_examples: 1000
+
+training:
+  beta: 0.1
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 5.0e-6
+  num_train_epochs: 1
+  max_steps: 200
+  eval_steps: 25
+  save_steps: 50
+  logging_steps: 5
+  warmup_steps: 10
+  max_length: 1024
+  bf16: false
+  fp16: true
+  gradient_checkpointing: true
+  smoke_max_steps: 2
+  report_to: []
+  lora:
+    enabled: true
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - up_proj
+      - down_proj
+      - gate_proj
+
+evaluation:
+  confidence_default: 0.5
+

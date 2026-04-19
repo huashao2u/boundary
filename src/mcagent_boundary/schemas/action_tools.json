@@ -1,0 +1,69 @@
+{
+  "tools": [
+    {
+      "name": "search",
+      "description": "Retrieve external information relevant to the question.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "calculate",
+      "description": "Run arithmetic or symbolic computation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "expression": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expression"
+        ]
+      }
+    },
+    {
+      "name": "clarify",
+      "description": "Request a missing user detail needed to complete the task.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "slot": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "slot"
+        ]
+      }
+    },
+    {
+      "name": "refuse",
+      "description": "Refuse when the question is unsupported, false-premise, or unjustified under current tools/context.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      }
+    }
+  ]
+}
+

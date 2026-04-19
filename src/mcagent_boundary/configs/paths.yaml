@@ -1,0 +1,29 @@
+project:
+  name: mcagent-boundary
+
+paths:
+  repo_root: .
+  shared_core_root: ./src/mcagent_core
+  dataset_root: ./dataset
+  model_root: ./models/qwen/Qwen2.5-7B-Instruct
+  work_root: .
+  adapter_cache_dir: ./artifacts/adapters
+  rollout_output: ./artifacts/rollouts/all_rollouts.jsonl
+  eval_rollout_output: ./artifacts/rollouts/eval_rollouts.jsonl
+  mining_output: ./artifacts/mining/mined_boundary.json
+  boundary_candidates_output: ./artifacts/mining/boundary_candidates.jsonl
+  clear_answer_output: ./artifacts/mining/clear_answer_anchors.jsonl
+  clear_external_output: ./artifacts/mining/clear_external_anchors.jsonl
+  teacher_label_output: ./artifacts/annotation/teacher_labels.jsonl
+  sft_output: ./artifacts/training/warmup_sft.jsonl
+  train_pair_output: ./artifacts/training/train_step_dpo_pairs.jsonl
+  eval_pair_output: ./artifacts/training/eval_step_dpo_pairs.jsonl
+  warmup_output_dir: ./artifacts/checkpoints/warmup_sft
+  dpo_output_dir: ./artifacts/checkpoints/step_dpo
+  action_eval_output: ./artifacts/reports/action_metrics.json
+  task_eval_output: ./artifacts/reports/task_metrics.json
+  calibration_eval_output: ./artifacts/reports/calibration_metrics.json
+  aggregate_eval_output: ./artifacts/reports/aggregate_metrics.json
+  search_corpus_output: ./artifacts/reports/local_search_corpus.json
+  search_index_output: ./artifacts/reports/local_search_index.json
+  legacy_report_output: ./artifacts/reports/core_inspection.json

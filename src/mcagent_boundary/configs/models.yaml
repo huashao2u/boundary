@@ -1,0 +1,16 @@
+student:
+  name: qwen2.5-7b-instruct
+  model_path_env: STUDENT_MODEL_PATH
+  fallback_model_path: ./models/qwen/Qwen2.5-7B-Instruct
+
+teacher:
+  provider: poe
+  model_env: POE_TEACHER_MODEL
+  default_model: gpt-4o
+  api_key_env: POE_API_KEY
+  base_url_env: POE_BASE_URL
+  chat_completions_env: POE_CHAT_COMPLETIONS_URL
+  default_base_url: https://api.poe.com/v1
+  temperature: 0.0
+  max_retries: 3
+  timeout_seconds: 120
