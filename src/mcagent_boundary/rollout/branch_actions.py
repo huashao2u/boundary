@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import json
 import re
-from hashlib import sha1
 from pathlib import Path
 from typing import Any
 
 from mcagent_boundary.envs.sandbox import BoundarySandbox
 from mcagent_boundary.features.process_features import compute_process_features
 from mcagent_boundary.features.semantic_tags import active_semantic_tags, infer_semantic_tags
+from mcagent_boundary.rollout.state import build_state
 from mcagent_boundary.scoring.correctness import evaluate_branch_correctness
 from mcagent_boundary.scoring.utility import evaluate_branch_utilities
 
@@ -113,6 +112,42 @@ def _branch_summary(branch: dict[str, Any]) -> str:
     )
 
 
+REQUIRED_ACTION_FIELDS = {
+    "ANSWER": "answer",
+    "SEARCH": "query",
+    "CALCULATE": "expression",
+    "CLARIFY": "question",
+    "REFUSE": "reason",
+}
+
+
+def _coerce_natural_action_input(
+    action: str,
+    student_input: dict[str, Any],
+    example,
+    semantic_tags: dict[str, bool],
+) -> dict[str, Any]:
+    """Ensure the student's action_input is executable.
+
+    If the student emitted the right action but an empty/missing required field
+    (e.g. ``CALCULATE`` with no ``expression``), fall back to the counterfactual
+    builder for that one field so the branch is still executable. We keep the
+    student's *decision* (the action) intact — only the input is repaired.
+    """
+    required = REQUIRED_ACTION_FIELDS.get(action)
+    if required is None:
+        return student_input
+    value = student_input.get(required)
+    if isinstance(value, str) and value.strip():
+        return student_input
+    if value not in (None, "", {}, []):
+        return student_input
+    counterfactual = _build_counterfactual_action_input(action, example, semantic_tags)
+    repaired = dict(student_input)
+    repaired[required] = counterfactual.get(required, "")
+    return repaired
+
+
 def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> dict[str, Any]:
     prompt_text = build_student_prompt(example)
     legacy_sample = example.to_legacy_sample()
@@ -130,7 +165,15 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
     branches: list[dict[str, Any]] = []
     for action in candidate_actions:
         sandbox = BoundarySandbox(example=example, config=config, phase=phase)
-        action_input = dict(natural_decision.get("action_input", {})) if action == natural_action else _build_counterfactual_action_input(action, example, base_semantic_tags)
+        if action == natural_action:
+            action_input = _coerce_natural_action_input(
+                action,
+                dict(natural_decision.get("action_input", {})),
+                example,
+                base_semantic_tags,
+            )
+        else:
+            action_input = _build_counterfactual_action_input(action, example, base_semantic_tags)
         observation, done, info = sandbox.step(action, action_input)
         if action == "ANSWER":
             final_answer = action_input.get("answer")
@@ -161,18 +204,18 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
     candidate_utilities = {branch["action"]: float(branch["utility"]) for branch in scored_branches}
     best_action = ranked[0]["action"] if ranked else None
     natural_branch = next((branch for branch in scored_branches if branch["action"] == natural_action), None)
-    state_key = json.dumps(
-        {
-            "example_id": example.example_id,
-            "question": example.question,
-            "reason_prefix": reason_prefix,
-            "active_semantic_tags": active_semantic_tags(example, reason_prefix=reason_prefix),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
+    resolved_active_tags = active_semantic_tags(example, reason_prefix=reason_prefix)
+    state = build_state(
+        example=example,
+        reason_prefix=reason_prefix,
+        history=None,
+        process_features=process_features,
+        semantic_tags=base_semantic_tags,
+        active_semantic_tags=resolved_active_tags,
     )
     return {
-        "state_id": sha1(state_key.encode("utf-8")).hexdigest(),
+        "state_id": state.state_key_hash(),
+        "state": state.to_dict(),
         "example_id": example.example_id,
         "dataset": example.dataset,
         "split": example.split,

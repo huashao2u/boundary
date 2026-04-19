@@ -6,15 +6,22 @@ datasets:
     - mintqa
   eval:
     - freshqa
+    # - truthfulqa    # see CLAUDE.md §Change 6: enable once dataset/truthfulqa exists
+    # - realtimeqa    # see CLAUDE.md §Change 6: enable once dataset/realtimeqa exists
   default_splits:
     gsm8k: train
     math: train
     in3: train
     mintqa: train
     freshqa: test
+    # truthfulqa: validation
+    # realtimeqa: test
 
 rollout:
-  backend: heuristic
+  # hf = student model (default, required for the main experiment);
+  # heuristic = oracle smoke/debug only (reads gold labels — NOT for production runs);
+  # auto = prefer hf, fall back to heuristic with a loud warning if model assets are missing.
+  backend: hf
   limit_per_dataset: null
   max_new_tokens: 256
   exploration_rate: 0.2

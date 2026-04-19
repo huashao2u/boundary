@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+# TODO(boundary eval extension — CLAUDE.md §Change 6):
+#   Future eval datasets will include `truthfulqa` and `realtimeqa`. Stub
+#   adapters already live at:
+#     - src/mcagent_boundary/adapters/truthfulqa.py
+#     - src/mcagent_boundary/adapters/realtimeqa.py
+#   Once raw assets exist under `dataset/truthfulqa` and `dataset/realtimeqa`,
+#   (1) implement the adapters' `_convert` methods,
+#   (2) uncomment the corresponding entries in `configs/rollout.yaml`,
+#   (3) this script will pick them up via `config["datasets"]["eval"]`.
+
 import argparse
 import json
 import sys

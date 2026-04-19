@@ -12,6 +12,14 @@ data:
     freshqa: test
     in3: train
     mintqa: train
+  # Used by mcagent_core/tools/search/corpus_builder.py when
+  # tools.search.index_split is "all" (the default for rollout runs).
+  phase_a_datasets:
+    - gsm8k
+    - competition_math
+    - freshqa
+    - in3
+    - mintqa
 
 tools:
   search:

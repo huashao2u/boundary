@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +12,10 @@ from typing import Any
 from mcagent_core.features.semantic_tags import build_semantic_tags
 from mcagent_core.prompting.build_prompts import parse_decision_output
 from mcagent_core.scoring.action_oracle import choose_oracle_action
+
+
+logger = logging.getLogger(__name__)
+_HEURISTIC_WARNED = False
 
 
 def _deterministic_ratio(key: str) -> float:
@@ -44,8 +50,25 @@ ACTION_SPACE = ("ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE")
 
 
 class HeuristicPolicy:
+    """Oracle-style fallback policy for smoke tests, ablations, and missing-asset fallback.
+
+    WARNING: This policy reads ``sample.gold_answer`` and
+    ``sample.metadata["gold_clarify_question"]`` when constructing action inputs, so its
+    "natural" decisions are gold-label-leaking. It MUST NOT be used as the default
+    rollout policy for the main experiment — set ``rollout.backend: hf`` (or ``auto``)
+    to use the student model. See CLAUDE.md §Change 1.
+    """
+
     def __init__(self, exploration_rate: float = 0.0):
         self.exploration_rate = exploration_rate
+        global _HEURISTIC_WARNED
+        if not _HEURISTIC_WARNED:
+            logger.warning(
+                "HeuristicPolicy active — natural action is gold-leaking and MUST NOT "
+                "be used as the main experiment policy. Use rollout.backend=hf (or "
+                "auto) for real student-driven rollouts."
+            )
+            _HEURISTIC_WARNED = True
 
     def generate_decision(self, sample, prompt_text: str) -> PolicyOutput:
         tags = build_semantic_tags(sample)
@@ -159,11 +182,39 @@ class HFLocalPolicy:
             "eos_token": tokenizer.eos_token,
         }
 
+    def _format_prompt_for_generation(self, prompt_text: str) -> str:
+        """Wrap ``prompt_text`` with the tokenizer's chat template when available.
+
+        Without this, instruction-tuned models such as Qwen2.5-Instruct produce
+        empty or degenerate continuations because they expect the standard
+        ``<|im_start|>/<|im_end|>`` role framing. ``build_student_prompt`` builds
+        a ``<system>\\n\\n<user>`` string — we split on the blank line and feed
+        each half into the chat template.
+        """
+        if getattr(self.tokenizer, "chat_template", None) is None:
+            return prompt_text
+        system_part, _, user_part = prompt_text.partition("\n\n")
+        if not user_part:
+            messages = [{"role": "user", "content": prompt_text}]
+        else:
+            messages = [
+                {"role": "system", "content": system_part},
+                {"role": "user", "content": user_part},
+            ]
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
     def generate_decision(self, sample, prompt_text: str) -> PolicyOutput:
         action_scores, action_probabilities = self._score_action_options(prompt_text)
-        inputs = self.tokenizer(prompt_text, return_tensors="pt").to(self.model.device)
+        formatted_prompt = self._format_prompt_for_generation(prompt_text)
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)
         output = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
-        decoded = self.tokenizer.decode(output[0], skip_special_tokens=True)
+        # Slice off the prompt tokens so ``decoded`` contains only the student's
+        # new continuation — otherwise ``parse_decision_output`` sees the whole
+        # prompt and the keyword-fallback branch always returns ANSWER.
+        generated_tokens = output[0][inputs.input_ids.shape[1]:]
+        decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         parsed = parse_decision_output(decoded)
         decision = parsed["decision"]
         confidence_source = "decision_confidence_output"
@@ -203,9 +254,29 @@ class HFLocalPolicy:
         return action_scores, action_probabilities
 
 
+def _model_assets_available(model_path: str) -> bool:
+    if not model_path:
+        return False
+    root = os.path.abspath(model_path)
+    if not os.path.isdir(root):
+        return False
+    # A HuggingFace checkpoint must at minimum ship a config.json at the root.
+    return os.path.isfile(os.path.join(root, "config.json"))
+
+
 def build_policy(backend: str, model_path: str, exploration_rate: float, max_new_tokens: int):
     if backend == "heuristic":
         return HeuristicPolicy(exploration_rate=exploration_rate)
     if backend == "hf":
         return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens)
+    if backend == "auto":
+        if _model_assets_available(model_path):
+            return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens)
+        logger.warning(
+            "rollout.backend=auto: student model assets not found at %r — "
+            "falling back to HeuristicPolicy (gold-leaking). This is smoke-only "
+            "behavior; do NOT use these rollouts for the mainline experiment.",
+            model_path,
+        )
+        return HeuristicPolicy(exploration_rate=exploration_rate)
     raise KeyError(f"Unsupported backend: {backend}")

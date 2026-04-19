@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+# TODO(boundary): produce a *per-branch* teacher reflection so the rejected
+# completion's reasoning text is also teacher-generated. Current interim
+# behavior: `chosen` uses the teacher's single meta_reflection; `rejected`
+# uses a deterministic counterfactual line so chosen/rejected pairs are not
+# textually identical. See CLAUDE.md §Change 4.
+
 import json
 from hashlib import sha1
-from typing import Any
+from typing import Any, Literal
 
 
 def _flatten_messages(messages: list[dict[str, str]]) -> str:
@@ -22,12 +28,30 @@ def _render_prompt_text(record: dict[str, Any]) -> str:
     )
 
 
-def _render_completion_text(branch: dict[str, Any], teacher_label: dict[str, Any] | None) -> str:
-    reflection = (
-        teacher_label.get("meta_reflection")
-        if teacher_label is not None
-        else f"I should prefer {branch['action']} under the current evidence and uncertainty."
+def _reflection_for_role(
+    branch: dict[str, Any],
+    teacher_label: dict[str, Any] | None,
+    role_label: Literal["chosen", "rejected"],
+) -> str:
+    if role_label == "chosen":
+        if teacher_label is not None and teacher_label.get("meta_reflection"):
+            return str(teacher_label["meta_reflection"])
+        return f"I should prefer {branch['action']} under the current evidence and uncertainty."
+    # rejected role — intentionally NOT the teacher's meta_reflection, so the
+    # chosen and rejected completions differ in surrounding text as well as in
+    # the final JSON action payload. See CLAUDE.md §Change 4.
+    return (
+        f"Alternative choice: picking {branch['action']} despite its lower local "
+        f"utility under this boundary state."
     )
+
+
+def _render_completion_text(
+    branch: dict[str, Any],
+    teacher_label: dict[str, Any] | None,
+    role_label: Literal["chosen", "rejected"] = "chosen",
+) -> str:
+    reflection = _reflection_for_role(branch, teacher_label, role_label)
     payload = {
         "action": branch["action"],
         "action_input": branch.get("action_input", {}),
@@ -63,12 +87,12 @@ def _build_prompt_messages(record: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
-def _build_completion_messages(branch: dict[str, Any], teacher_label: dict[str, Any] | None) -> list[dict[str, str]]:
-    reflection = (
-        teacher_label.get("meta_reflection")
-        if teacher_label is not None
-        else f"I should prefer {branch['action']} under the current evidence and uncertainty."
-    )
+def _build_completion_messages(
+    branch: dict[str, Any],
+    teacher_label: dict[str, Any] | None,
+    role_label: Literal["chosen", "rejected"] = "chosen",
+) -> list[dict[str, str]]:
+    reflection = _reflection_for_role(branch, teacher_label, role_label)
     payload = {
         "action": branch["action"],
         "action_input": branch.get("action_input", {}),
@@ -128,8 +152,8 @@ def build_step_dpo_pairs(
             continue
         teacher_label = teacher_by_state.get(record["state_id"])
         prompt_messages = _build_prompt_messages(record)
-        chosen_messages = _build_completion_messages(chosen_branch, teacher_label)
-        rejected_messages = _build_completion_messages(rejected_branch, teacher_label)
+        chosen_messages = _build_completion_messages(chosen_branch, teacher_label, role_label="chosen")
+        rejected_messages = _build_completion_messages(rejected_branch, teacher_label, role_label="rejected")
         pair = {
             "state_id": record["state_id"],
             "example_id": record["example_id"],
@@ -140,8 +164,8 @@ def build_step_dpo_pairs(
             "chosen_messages": chosen_messages,
             "rejected_messages": rejected_messages,
             "prompt": _render_prompt_text(record),
-            "chosen": _render_completion_text(chosen_branch, teacher_label),
-            "rejected": _render_completion_text(rejected_branch, teacher_label),
+            "chosen": _render_completion_text(chosen_branch, teacher_label, role_label="chosen"),
+            "rejected": _render_completion_text(rejected_branch, teacher_label, role_label="rejected"),
             "chosen_action": chosen_branch["action"],
             "rejected_action": rejected_branch["action"],
             "metadata": {

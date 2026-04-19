@@ -30,3 +30,22 @@ The repository ships with:
 - `dataset/` copied locally from the legacy project
 - `models/` symlinked to `/media/songyl/SALRA/models`
 - a single `pyproject.toml` that exposes both `mcagent_boundary` and `mcagent_core`
+
+## Rollout backend
+
+The default rollout backend is `hf` (the student model, `qwen2.5-7b-instruct`),
+configured in `src/mcagent_boundary/configs/rollout.yaml`. Available options:
+
+- `hf` — **default**; runs the student model for every `natural_action` decision.
+- `heuristic` — oracle-style smoke policy (reads gold labels). Useful for
+  ablations, debugging, and pipeline smoke tests; **not** for mainline experiment
+  runs. A warning is logged whenever it becomes active.
+- `auto` — prefer `hf`, but fall back to `heuristic` (with a loud warning) if
+  the student model assets at `paths.model_root` are missing. Convenient for
+  CI / smoke runs on machines without the full checkpoint.
+
+If `backend: hf` is configured but the checkpoint is absent on disk,
+`generate_rollouts()` automatically demotes the run to `heuristic` and emits a
+warning — the pipeline still finishes, but the output should not be treated as
+a mainline experiment artifact.
+
