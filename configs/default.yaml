@@ -53,8 +53,8 @@ teacher:
   provider: poe
   model_env: POE_TEACHER_MODEL
   default_model: "gpt-4o"
-  api_key_env: "sk-poe-Wn8MBW1zPuTovdbXZgAZQLLsJAK5B6uS0DlmEIaWEA4"
-  api_key: "sk-poe-Wn8MBW1zPuTovdbXZgAZQLLsJAK5B6uS0DlmEIaWEA4"
+  api_key_env: ""
+  api_key: ""
   base_url_env: POE_BASE_URL
   default_base_url: "https://api.poe.com/v1"
   chat_completions_env: POE_CHAT_COMPLETIONS_URL
