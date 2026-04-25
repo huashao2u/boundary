@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 from typing import Any
 
@@ -9,6 +10,22 @@ from mcagent_core.data.loaders import UnifiedSample
 
 
 ALLOWED_ACTIONS = ("ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE")
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Diagnostics counters (module-level, per process lifetime)
+# ---------------------------------------------------------------------------
+_DIAG_COUNTS: dict[str, int] = {
+    "parsed_ok": 0,
+    "invalid_schema": 0,
+    "invalid_missing_answer": 0,
+    "invalid_single_action": 0,
+}
+
+
+def get_diagnostics_counts() -> dict[str, int]:
+    """Return a copy of the module-level parse diagnostics counters."""
+    return dict(_DIAG_COUNTS)
 
 
 def build_system_prompt(enable_tool_schema: bool = True) -> str:
@@ -201,6 +218,146 @@ def parse_decision_output(raw_text: str) -> dict[str, Any]:
             "brief_rationale": str(decision.get("brief_rationale", "")).strip(),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# v0.2 top-k candidate parser
+# ---------------------------------------------------------------------------
+
+_REQUIRED_ACTION_INPUT_KEYS = {
+    "ANSWER": "answer",
+    "SEARCH": "query",
+    "CALCULATE": "expression",
+    "CLARIFY": "question",
+    "REFUSE": "reason",
+}
+
+
+def _minimal_repair_action_input(action: str, action_input: Any) -> dict[str, Any]:
+    """Minimally repair an action_input dict — never inject gold data."""
+    if not isinstance(action_input, dict):
+        action_input = {}
+    required_key = _REQUIRED_ACTION_INPUT_KEYS.get(action)
+    if required_key is None:
+        return action_input
+    value = action_input.get(required_key)
+    if isinstance(value, str) and value.strip():
+        return action_input
+    if value not in (None, "", {}, []):
+        return action_input
+    repaired = dict(action_input)
+    repaired[required_key] = ""
+    return repaired
+
+
+def parse_candidate_output(raw_text: str) -> dict[str, Any] | None:
+    """Parse a v0.2 top-k candidate response from the student model.
+
+    Returns a dict with keys ``reasoning`` and ``candidates`` on success.
+    Returns ``None`` and writes a diagnostics entry on parse failure.
+
+    Rules enforced (§1 / §1a / §Schema):
+    - Unique action types in candidates; list len 2–3.
+    - ANSWER must be present.
+    - Degenerate single-action-type → None + ``invalid_single_action``.
+    - ANSWER missing           → None + ``invalid_missing_answer``.
+    - JSON parse/schema error  → None + ``invalid_schema``.
+    - action_input minimally repaired; gold never injected.
+    - Ranks normalized to 1, 2, 3 after dedup/sort.
+    """
+    global _DIAG_COUNTS
+    parsed: dict[str, Any] | None = None
+
+    try:
+        from json_repair import repair_json
+        candidate = repair_json(raw_text, return_objects=True)
+        if isinstance(candidate, dict):
+            parsed = candidate
+    except Exception:
+        parsed = None
+
+    if parsed is None:
+        match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                parsed = None
+
+    if parsed is None or not isinstance(parsed, dict):
+        _DIAG_COUNTS["invalid_schema"] += 1
+        logger.debug("parse_candidate_output: JSON parse failure. raw=%r", raw_text[:200])
+        return None
+
+    candidates_raw = parsed.get("candidates")
+    if not isinstance(candidates_raw, list) or len(candidates_raw) == 0:
+        _DIAG_COUNTS["invalid_schema"] += 1
+        logger.debug("parse_candidate_output: missing/empty candidates list")
+        return None
+
+    seen_actions: dict[str, dict[str, Any]] = {}
+    for item in candidates_raw:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip().upper()
+        if action not in ALLOWED_ACTIONS:
+            continue
+        if action in seen_actions:
+            continue
+        confidence = item.get("confidence")
+        try:
+            confidence = None if confidence is None else max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence = None
+        action_input = _minimal_repair_action_input(action, item.get("action_input", {}))
+        seen_actions[action] = {
+            "action": action,
+            "confidence": confidence,
+            "action_input": action_input,
+            "brief_rationale": str(item.get("brief_rationale", "")).strip(),
+        }
+
+    if len(seen_actions) < 2:
+        _DIAG_COUNTS["invalid_single_action"] += 1
+        logger.debug("parse_candidate_output: fewer than 2 unique action types: %s", list(seen_actions.keys()))
+        return None
+
+    if "ANSWER" not in seen_actions:
+        _DIAG_COUNTS["invalid_missing_answer"] += 1
+        logger.debug("parse_candidate_output: ANSWER missing from candidates")
+        return None
+
+    # Trim to top-3 unique actions, preserving original rank ordering from the JSON list.
+    ordered = []
+    for item in candidates_raw:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "")).strip().upper()
+        if action in seen_actions and action not in [c["action"] for c in ordered]:
+            ordered.append(seen_actions[action])
+        if len(ordered) == 3:
+            break
+    # Ensure ANSWER is always included even if beyond top-3 in original list.
+    if "ANSWER" not in [c["action"] for c in ordered]:
+        ordered.append(seen_actions["ANSWER"])
+        ordered = ordered[:3]
+
+    # Normalize ranks.
+    candidates = []
+    for rank, cand in enumerate(ordered, start=1):
+        candidates.append({**cand, "rank": rank})
+
+    reasoning_raw = parsed.get("reasoning", {})
+    if not isinstance(reasoning_raw, dict):
+        reasoning_raw = {}
+    reasoning = {
+        "attempt": str(reasoning_raw.get("attempt", "")).strip(),
+        "uncertainty_summary": str(reasoning_raw.get("uncertainty_summary", "")).strip(),
+        "need_external_help": bool(reasoning_raw.get("need_external_help", False)),
+    }
+
+    _DIAG_COUNTS["parsed_ok"] += 1
+    return {"reasoning": reasoning, "candidates": candidates}
 
 
 def main() -> None:

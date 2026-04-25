@@ -18,24 +18,33 @@ from mcagent_boundary.rollout.generate_rollouts import generate_rollouts
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run full train-side boundary rollouts and mining.")
     parser.add_argument("--limit-per-dataset", type=int, default=None)
+    parser.add_argument("--output-dir", type=str, default=None, help="Override output directory for all artifacts.")
     args = parser.parse_args()
 
     config = load_boundary_config()
+
     rollouts = generate_rollouts(
         config,
         dataset_names=list(config["datasets"]["train"]),
         phase=str(config["rollout"]["search_mode_train"]),
         limit_per_dataset=args.limit_per_dataset if args.limit_per_dataset is not None else config["rollout"]["limit_per_dataset"],
     )
-    rollout_output = resolve_repo_path(config["paths"]["rollout_output"], config)
+
+    def _out(name: str) -> Path:
+        base = resolve_repo_path(config["paths"][name], config)
+        if args.output_dir:
+            return Path(args.output_dir) / base.name
+        return base
+
+    rollout_output = _out("rollout_output")
     write_jsonl(rollout_output, rollouts)
 
     mined = mine_boundary_states(rollouts, config)
     sampled = sample_anchor_pools(mined, config)
-    write_json(resolve_repo_path(config["paths"]["mining_output"], config), mined["summary"])
-    write_jsonl(resolve_repo_path(config["paths"]["boundary_candidates_output"], config), sampled["boundary_candidates"])
-    write_jsonl(resolve_repo_path(config["paths"]["clear_answer_output"], config), sampled["clear_answer_anchors"])
-    write_jsonl(resolve_repo_path(config["paths"]["clear_external_output"], config), sampled["clear_external_anchors"])
+    write_json(_out("mining_output"), mined["summary"])
+    write_jsonl(_out("boundary_candidates_output"), sampled["boundary_candidates"])
+    write_jsonl(_out("clear_answer_output"), sampled["clear_answer_anchors"])
+    write_jsonl(_out("clear_external_output"), sampled["clear_external_anchors"])
     print(
         json.dumps(
             {

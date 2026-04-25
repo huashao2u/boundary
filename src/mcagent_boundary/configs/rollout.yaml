@@ -4,8 +4,8 @@ datasets:
     - math
     - in3
     - mintqa
-  eval:
-    - freshqa
+  eval: []
+    # freshqa disabled for this run — per user; re-enable once tool finalize pass is validated.
     # - truthfulqa    # see CLAUDE.md §Change 6: enable once dataset/truthfulqa exists
     # - realtimeqa    # see CLAUDE.md §Change 6: enable once dataset/realtimeqa exists
   default_splits:
@@ -13,7 +13,6 @@ datasets:
     math: train
     in3: train
     mintqa: train
-    freshqa: test
     # truthfulqa: validation
     # realtimeqa: test
 
@@ -23,12 +22,92 @@ rollout:
   # auto = prefer hf, fall back to heuristic with a loud warning if model assets are missing.
   backend: hf
   limit_per_dataset: null
-  max_new_tokens: 256
-  exploration_rate: 0.2
+  max_new_tokens: 1024
+  top_k_actions: 3                  # k=3; avoids degenerate full-action ranking
+  min_candidate_count: 2            # discard if student produces < 2 unique action types
+  candidate_temperature: 0.7        # HF-only; controls candidate diversity
+  candidate_top_p: 0.95             # HF-only
+  heuristic_exploration_rate: 0.2   # heuristic policy only; was exploration_rate
+  exploration_rate: 0.2             # backward-compat alias — do not remove
+  allow_debug_fallback_branch: true
+  use_fallback_branches_for_training: false  # debug fallback branches never enter training
   shallow: true
   max_branch_steps: 1
   search_mode_train: train
   search_mode_eval: eval
+
+annotation:
+  execute_tools: false              # training annotation: no real tool calls
+  tool_finalize_pass: false         # no finalize pass during annotation
+  score_sources:                    # §5a mixed estimator signal mapping
+    ANSWER: auto_correctness        # gold hard label when available; else teacher
+    CALCULATE: expression_and_goal  # expression_validity × goal_alignment; fallback teacher
+    CLARIFY: slot_hit_rate          # gold slot overlap when available; else teacher
+    SEARCH: teacher_helpfulness
+    REFUSE: teacher_helpfulness
+
+eval:
+  execute_tools: true               # eval: execute tools for real
+  tool_finalize_pass: true          # run student finalize pass after tool observation
+  max_branch_steps: 2
+
+calibration:
+  enabled: true
+  sample_size: 300
+  input_split: "train_heldout"
+  output_dir: "artifacts_v02/calibration"
+  min_spearman: 0.5
+  min_argmax_hit_rate: 0.6
+  min_per_action_auc: 0.6
+  per_action_breakdown:
+    - ANSWER_vs_non_ANSWER
+    - SEARCH
+    - CLARIFY
+    - REFUSE
+    - CALCULATE
+
+scoring:
+  base_value:
+    ANSWER: 1.0
+    SEARCH: 0.6
+    CALCULATE: 0.6
+    CLARIFY: 0.5
+    REFUSE: 0.4
+  action_cost:
+    SEARCH: 0.10      # lambda_tool
+    CALCULATE: 0.05   # lambda_calc
+    CLARIFY: 0.10     # lambda_clar
+    ANSWER: 0.0
+    REFUSE: 0.0
+  # semantic_bonus: only semantic tag keys are allowed here.
+  # Process features (STRUGGLE_LONG, LOW_LOGIT_MARGIN, etc.) MUST NOT appear here.
+  semantic_bonus:
+    TIME_SENSITIVE_SEARCH: 0.05
+    NEW_OR_TAIL_KNOWLEDGE_SEARCH: 0.05
+    CALCULATION_REQUIRED_CALCULATE: 0.05
+    MISSING_INFO_CLARIFY: 0.05
+    FALSE_PREMISE_REFUSE: 0.05
+    cap_per_candidate: 0.15
+  # Legacy flat keys for backward compatibility with old utility.py loader.
+  lambda_tool: 0.10
+  lambda_calc: 0.05
+  lambda_clar: 0.10
+  answer_correct: 1.0
+  answer_wrong: -1.0
+  refuse_justified: 0.4
+  refuse_unjustified: -0.6
+  search_helpful: 0.6
+  search_unhelpful: -0.1
+  calculate_helpful: 0.6
+  calculate_unhelpful: -0.1
+  clarify_helpful: 0.5
+  clarify_unhelpful: -0.1
+
+pair_construction:
+  min_utility_gap: 0.2              # gap between chosen and rejected U_rel
+  require_different_action_types: true
+  truncate_at_action_emission: true  # training pairs end at action emission; no tool obs/finalize
+
 
 features:
   long_reason_token_threshold: 80

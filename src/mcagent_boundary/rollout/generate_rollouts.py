@@ -50,10 +50,13 @@ def generate_rollouts(config: dict, dataset_names: list[str], phase: str, limit_
     examples = load_standardized_examples(config, dataset_names=dataset_names, limit_per_dataset=limit_per_dataset)
     model_path = str(Path(config["paths"]["model_root"]).resolve())
     backend = _resolve_backend(str(config["rollout"]["backend"]), model_path)
+    rollout_cfg = config.get("rollout", {})
     policy = build_policy(
         backend=backend,
         model_path=model_path,
-        exploration_rate=float(config["rollout"]["exploration_rate"]),
-        max_new_tokens=int(config["rollout"]["max_new_tokens"]),
+        exploration_rate=float(rollout_cfg.get("heuristic_exploration_rate", rollout_cfg.get("exploration_rate", 0.2))),
+        max_new_tokens=int(rollout_cfg.get("max_new_tokens", 256)),
+        candidate_temperature=float(rollout_cfg.get("candidate_temperature", 0.7)),
+        candidate_top_p=float(rollout_cfg.get("candidate_top_p", 0.95)),
     )
     return [rollout_one_example(example, config=config, phase=phase, policy=policy) for example in examples]

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mcagent_core.features.semantic_tags import build_semantic_tags
-from mcagent_core.prompting.build_prompts import parse_decision_output
+from mcagent_core.prompting.build_prompts import parse_candidate_output, parse_decision_output
 from mcagent_core.scoring.action_oracle import choose_oracle_action
 
 
@@ -44,6 +44,10 @@ class PolicyOutput:
     action_scores: dict[str, float] | None = None
     action_probabilities: dict[str, float] | None = None
     confidence_source: str | None = None
+    # v0.2 top-k candidate fields
+    reasoning_attempt: str = ""
+    uncertainty_summary: str = ""
+    candidates: list[dict[str, Any]] | None = None
 
 
 ACTION_SPACE = ("ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE")
@@ -57,10 +61,16 @@ class HeuristicPolicy:
     "natural" decisions are gold-label-leaking. It MUST NOT be used as the default
     rollout policy for the main experiment — set ``rollout.backend: hf`` (or ``auto``)
     to use the student model. See CLAUDE.md §Change 1.
+
+    NOTE (v0.2): HeuristicPolicy cannot produce genuine multi-candidate top-k output.
+    It returns one oracle candidate plus a degenerate ANSWER fallback only so the
+    downstream branch_actions.py has a minimal 2-candidate list for smoke tests.
+    Do NOT use heuristic-policy rollouts to build training pairs.
     """
 
     def __init__(self, exploration_rate: float = 0.0):
         self.exploration_rate = exploration_rate
+        # Accept both old and new config name (§Problem F).
         global _HEURISTIC_WARNED
         if not _HEURISTIC_WARNED:
             logger.warning(
@@ -88,14 +98,45 @@ class HeuristicPolicy:
             "action_input": self._build_action_input(action, sample),
             "brief_rationale": self._build_rationale(action, sample, tags),
         }
-        payload = {"reason": self._build_reason(sample, action, tags), "decision": decision}
+        # Build a minimal 2-candidate list for v0.2 compatibility (smoke only).
+        primary_candidate = {
+            "rank": 1,
+            "action": action,
+            "confidence": 0.7,
+            "action_input": dict(decision["action_input"]),
+            "brief_rationale": decision["brief_rationale"],
+        }
+        if action != "ANSWER":
+            answer_candidate = {
+                "rank": 2,
+                "action": "ANSWER",
+                "confidence": 0.3,
+                "action_input": self._build_action_input("ANSWER", sample),
+                "brief_rationale": "Direct answer as fallback (heuristic smoke only).",
+            }
+            candidates = [primary_candidate, answer_candidate]
+        else:
+            secondary = "SEARCH" if tags.get("TIME_SENSITIVE") or tags.get("NEW_OR_TAIL_KNOWLEDGE") else "CALCULATE"
+            secondary_candidate = {
+                "rank": 2,
+                "action": secondary,
+                "confidence": 0.3,
+                "action_input": self._build_action_input(secondary, sample),
+                "brief_rationale": f"{secondary} as alternative (heuristic smoke only).",
+            }
+            candidates = [primary_candidate, secondary_candidate]
+        reason = self._build_reason(sample, action, tags)
+        payload = {"reason": reason, "decision": decision}
         return PolicyOutput(
             raw_text=json.dumps(payload, ensure_ascii=False, indent=2),
-            reason=payload["reason"],
+            reason=reason,
             decision=decision,
             action_scores=None,
             action_probabilities=None,
             confidence_source="heuristic_no_confidence",
+            reasoning_attempt=reason,
+            uncertainty_summary="Heuristic policy; no genuine uncertainty estimate.",
+            candidates=candidates,
         )
 
     def finalize_after_tool(self, sample, decision: dict[str, Any], observation: dict[str, Any]) -> dict[str, str]:
@@ -158,7 +199,8 @@ class HeuristicPolicy:
         return {"reason": "The premise appears false or cannot be verified."}
 
 class HFLocalPolicy:
-    def __init__(self, model_path: str, max_new_tokens: int = 256):
+    def __init__(self, model_path: str, max_new_tokens: int = 256,
+                 candidate_temperature: float = 0.7, candidate_top_p: float = 0.95):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -166,6 +208,8 @@ class HFLocalPolicy:
         self.model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype="auto", device_map="auto")
         self.torch = torch
         self.max_new_tokens = max_new_tokens
+        self.candidate_temperature = candidate_temperature
+        self.candidate_top_p = candidate_top_p
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -209,12 +253,49 @@ class HFLocalPolicy:
         action_scores, action_probabilities = self._score_action_options(prompt_text)
         formatted_prompt = self._format_prompt_for_generation(prompt_text)
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)
-        output = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": self.candidate_temperature > 0.0,
+        }
+        if self.candidate_temperature > 0.0:
+            gen_kwargs["temperature"] = self.candidate_temperature
+            gen_kwargs["top_p"] = self.candidate_top_p
+        output = self.model.generate(**inputs, **gen_kwargs)
         # Slice off the prompt tokens so ``decoded`` contains only the student's
-        # new continuation — otherwise ``parse_decision_output`` sees the whole
-        # prompt and the keyword-fallback branch always returns ANSWER.
+        # new continuation — otherwise parse sees the whole prompt.
         generated_tokens = output[0][inputs.input_ids.shape[1]:]
         decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+
+        # Try v0.2 candidate parser first, fall back to legacy single-decision parser.
+        candidate_parsed = parse_candidate_output(decoded)
+        if candidate_parsed is not None:
+            candidates = candidate_parsed["candidates"]
+            reasoning = candidate_parsed["reasoning"]
+            # Primary decision = rank-1 candidate.
+            top = candidates[0]
+            decision = {
+                "action": top["action"],
+                "confidence": top["confidence"],
+                "action_input": top["action_input"],
+                "brief_rationale": top["brief_rationale"],
+            }
+            confidence_source = "candidate_output_rank1"
+            if decision.get("confidence") is None:
+                decision["confidence"] = round(action_probabilities.get(decision["action"], 0.5), 4)
+                confidence_source = "action_token_probability"
+            return PolicyOutput(
+                raw_text=decoded,
+                reason=reasoning["attempt"],
+                decision=decision,
+                action_scores=action_scores,
+                action_probabilities=action_probabilities,
+                confidence_source=confidence_source,
+                reasoning_attempt=reasoning["attempt"],
+                uncertainty_summary=reasoning["uncertainty_summary"],
+                candidates=candidates,
+            )
+
+        # Fallback: legacy single-decision parse.
         parsed = parse_decision_output(decoded)
         decision = parsed["decision"]
         confidence_source = "decision_confidence_output"
@@ -228,6 +309,9 @@ class HFLocalPolicy:
             action_scores=action_scores,
             action_probabilities=action_probabilities,
             confidence_source=confidence_source,
+            reasoning_attempt=parsed["reason"],
+            uncertainty_summary="",
+            candidates=None,
         )
 
     def finalize_after_tool(self, sample, decision: dict[str, Any], observation: dict[str, Any]) -> dict[str, str]:
@@ -264,14 +348,18 @@ def _model_assets_available(model_path: str) -> bool:
     return os.path.isfile(os.path.join(root, "config.json"))
 
 
-def build_policy(backend: str, model_path: str, exploration_rate: float, max_new_tokens: int):
+def build_policy(backend: str, model_path: str, exploration_rate: float, max_new_tokens: int,
+                 candidate_temperature: float = 0.7, candidate_top_p: float = 0.95):
+    # Accept both old name (exploration_rate) and new name (heuristic_exploration_rate).
     if backend == "heuristic":
         return HeuristicPolicy(exploration_rate=exploration_rate)
     if backend == "hf":
-        return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens)
+        return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
+                             candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p)
     if backend == "auto":
         if _model_assets_available(model_path):
-            return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens)
+            return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
+                                 candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p)
         logger.warning(
             "rollout.backend=auto: student model assets not found at %r — "
             "falling back to HeuristicPolicy (gold-leaking). This is smoke-only "

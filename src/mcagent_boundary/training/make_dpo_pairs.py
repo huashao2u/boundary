@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# NOTE(boundary v0.2): Pair construction now sources exclusively from student-proposed
+# top-k candidates ranked by U_rel (not U_real/outcome). Pairs are truncated at action
+# emission (no tool obs/finalize in training pairs). Chosen = argmax U_rel with
+# rubric_degenerate=false; Rejected = lowest U_rel with different action type and
+# gap >= min_utility_gap (0.2). Message format: prompt_messages/chosen_messages/rejected_messages.
+# See §pair_construction in rollout.yaml.
+#
 # TODO(boundary): produce a *per-branch* teacher reflection so the rejected
 # completion's reasoning text is also teacher-generated. Current interim
 # behavior: `chosen` uses the teacher's single meta_reflection; `rejected`
@@ -7,25 +14,52 @@ from __future__ import annotations
 # textually identical. See CLAUDE.md §Change 4.
 
 import json
+import logging
 from hashlib import sha1
 from typing import Any, Literal
 
-
-def _flatten_messages(messages: list[dict[str, str]]) -> str:
-    return "\n".join(f"{message['role'].upper()}: {message['content']}" for message in messages)
+from mcagent_boundary.scoring.utility import utility_rel
 
 
-def _render_prompt_text(record: dict[str, Any]) -> str:
-    tool_list = ", ".join(action for action in [branch["action"] for branch in record["branches"] if branch["action"] != "ANSWER"])
-    return (
-        "SYSTEM: You are a decision-aware assistant. Choose the next action calibrated to the current boundary state.\n"
-        f"USER: Question: {record['question']}\n"
-        f"Dataset: {record['dataset']}\n"
-        f"Boundary type: {record['boundary_type']}\n"
-        f"Available actions: ANSWER{', ' + tool_list if tool_list else ''}\n"
-        f"ASSISTANT: Reasoning Prefix: {record.get('reason_prefix', '')}\n"
-        "ASSISTANT:"
-    )
+logger = logging.getLogger(__name__)
+
+_ACTION_SET = {"ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE"}
+
+
+# ---------------------------------------------------------------------------
+# Prompt / completion rendering
+# ---------------------------------------------------------------------------
+
+def _build_prompt_messages(record: dict[str, Any]) -> list[dict[str, str]]:
+    """Build prompt messages from student rollout record.
+
+    v0.2: uses student's own reasoning prefix as assistant turn; dataset/boundary
+    metadata is excluded from the prompt (§1 no gold/boundary leak to student).
+    Prompt is truncated at the point of action emission.
+    """
+    candidates = list(record.get("candidates") or [])
+    allowed_tools = [
+        c["action"] for c in candidates if str(c.get("action", "")).upper() != "ANSWER"
+    ]
+    tool_list = ", ".join(dict.fromkeys(a.upper() for a in allowed_tools))  # preserve order, dedup
+
+    return [
+        {
+            "role": "system",
+            "content": "You are a decision-aware assistant. Choose the next action calibrated to the current boundary state.",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Question: {record['question']}\n"
+                f"Available actions: ANSWER{', ' + tool_list if tool_list else ''}"
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": f"Reasoning: {record.get('reason_prefix', '')}",
+        },
+    ]
 
 
 def _reflection_for_role(
@@ -37,12 +71,45 @@ def _reflection_for_role(
         if teacher_label is not None and teacher_label.get("meta_reflection"):
             return str(teacher_label["meta_reflection"])
         return f"I should prefer {branch['action']} under the current evidence and uncertainty."
-    # rejected role — intentionally NOT the teacher's meta_reflection, so the
-    # chosen and rejected completions differ in surrounding text as well as in
-    # the final JSON action payload. See CLAUDE.md §Change 4.
+    # rejected role — intentionally NOT the teacher's meta_reflection so that
+    # chosen and rejected completions differ in surrounding text as well as the
+    # final JSON action payload. See CLAUDE.md §Change 4.
     return (
         f"Alternative choice: picking {branch['action']} despite its lower local "
         f"utility under this boundary state."
+    )
+
+
+def _build_completion_messages(
+    branch: dict[str, Any],
+    teacher_label: dict[str, Any] | None,
+    role_label: Literal["chosen", "rejected"] = "chosen",
+) -> list[dict[str, str]]:
+    """Build completion messages truncated at action emission (no tool obs/finalize)."""
+    reflection = _reflection_for_role(branch, teacher_label, role_label)
+    # action_input from the candidate — guaranteed no gold injection by branch_actions.py
+    payload = {
+        "action": branch["action"],
+        "action_input": branch.get("action_input", {}),
+    }
+    return [
+        {"role": "assistant", "content": f"Meta-Reflection: {reflection}"},
+        {"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
+
+def _render_prompt_text(record: dict[str, Any]) -> str:
+    """Legacy flat-text prompt for backward compat / debugging."""
+    candidates = list(record.get("candidates") or [])
+    tool_list = ", ".join(
+        dict.fromkeys(c["action"].upper() for c in candidates if c.get("action", "").upper() != "ANSWER")
+    )
+    return (
+        "SYSTEM: You are a decision-aware assistant. Choose the next action calibrated to the current boundary state.\n"
+        f"USER: Question: {record['question']}\n"
+        f"Available actions: ANSWER{', ' + tool_list if tool_list else ''}\n"
+        f"ASSISTANT: Reasoning: {record.get('reason_prefix', '')}\n"
+        "ASSISTANT:"
     )
 
 
@@ -51,75 +118,120 @@ def _render_completion_text(
     teacher_label: dict[str, Any] | None,
     role_label: Literal["chosen", "rejected"] = "chosen",
 ) -> str:
+    """Legacy flat-text completion for backward compat / debugging."""
     reflection = _reflection_for_role(branch, teacher_label, role_label)
     payload = {
         "action": branch["action"],
         "action_input": branch.get("action_input", {}),
-        "outcome_label": branch.get("outcome_label"),
     }
     return f" Meta-Reflection: {reflection}\n{json.dumps(payload, ensure_ascii=False)}"
 
+
+# ---------------------------------------------------------------------------
+# U_rel computation helpers
+# ---------------------------------------------------------------------------
+
+class _CandidateExampleProxy:
+    """Thin proxy so utility_rel can read example.question / gold_answer / metadata."""
+    def __init__(self, record: dict[str, Any]) -> None:
+        self.question = record.get("question", "")
+        self.gold_answer = record.get("gold_answer")
+        self.task_type = record.get("boundary_type", "")
+        self.metadata = record.get("metadata", {})
+
+
+def _score_candidates(
+    record: dict[str, Any],
+    teacher_label: dict[str, Any] | None,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return candidates enriched with u_rel, sourced from record.candidates.
+
+    Uses annotation branches (no tool execution) to build minimal branch dicts
+    for utility_rel computation.
+    """
+    example = _CandidateExampleProxy(record)
+    semantic_tags: dict[str, bool] = dict(record.get("semantic_tags") or {})
+    candidates = list(record.get("candidates") or [])
+
+    # Build a branch dict per candidate (annotation branch: no observation/correctness).
+    # We pull action_input from the annotation branches if available, else from candidates.
+    branch_by_action = {
+        b["action"]: b for b in (record.get("branches") or [])
+    }
+
+    scored: list[dict[str, Any]] = []
+    for cand in candidates:
+        action = str(cand.get("action", "ANSWER")).upper()
+        branch = branch_by_action.get(action) or {}
+        # Compose a minimal branch dict for utility_rel
+        branch_dict: dict[str, Any] = {
+            "action": action,
+            "action_input": cand.get("action_input") or branch.get("action_input") or {},
+            "confidence": cand.get("confidence"),
+            "brief_rationale": cand.get("brief_rationale", ""),
+            # annotation branches have no observation/correctness
+            "observation": branch.get("observation"),
+            "correctness": branch.get("correctness"),
+        }
+        u_rel_val = utility_rel(branch_dict, teacher_label, semantic_tags, example, config)
+        scored.append({
+            **cand,
+            "action": action,
+            "action_input": branch_dict["action_input"],
+            "u_rel": u_rel_val,
+            "brief_rationale": cand.get("brief_rationale", ""),
+        })
+    return scored
+
+
+# ---------------------------------------------------------------------------
+# Pair selection
+# ---------------------------------------------------------------------------
+
+def _pick_chosen_rejected(
+    scored_candidates: list[dict[str, Any]],
+    teacher_label: dict[str, Any] | None,
+    min_utility_gap: float,
+    require_different_action_types: bool,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Pick (chosen, rejected) from U_rel-ranked candidates.
+
+    Chosen: argmax U_rel, rubric_degenerate must be False (or teacher absent).
+    Rejected: lowest U_rel among candidates with a different action type and
+              gap >= min_utility_gap.
+    """
+    if len(scored_candidates) < 2:
+        return None
+
+    rubric_degenerate = bool(teacher_label and teacher_label.get("rubric_degenerate", False))
+    if rubric_degenerate:
+        return None
+
+    ranked = sorted(scored_candidates, key=lambda c: c["u_rel"], reverse=True)
+    chosen = ranked[0]
+
+    for candidate in reversed(ranked):  # iterate from lowest U_rel upward
+        if require_different_action_types and candidate["action"] == chosen["action"]:
+            continue
+        if chosen["u_rel"] - candidate["u_rel"] < min_utility_gap:
+            continue
+        return chosen, candidate
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Teacher lookup
+# ---------------------------------------------------------------------------
 
 def _teacher_lookup(teacher_labels: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {record["state_id"]: record for record in teacher_labels}
 
 
-def _build_prompt_messages(record: dict[str, Any]) -> list[dict[str, str]]:
-    tool_list = ", ".join(action for action in [branch["action"] for branch in record["branches"] if branch["action"] != "ANSWER"])
-    return [
-        {
-            "role": "system",
-            "content": "You are a decision-aware assistant. Choose the next action calibrated to the current boundary state.",
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Question: {record['question']}\n"
-                f"Dataset: {record['dataset']}\n"
-                f"Boundary type: {record['boundary_type']}\n"
-                f"Available actions: ANSWER{', ' + tool_list if tool_list else ''}"
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": f"Reasoning Prefix: {record.get('reason_prefix', '')}",
-        },
-    ]
-
-
-def _build_completion_messages(
-    branch: dict[str, Any],
-    teacher_label: dict[str, Any] | None,
-    role_label: Literal["chosen", "rejected"] = "chosen",
-) -> list[dict[str, str]]:
-    reflection = _reflection_for_role(branch, teacher_label, role_label)
-    payload = {
-        "action": branch["action"],
-        "action_input": branch.get("action_input", {}),
-        "outcome_label": branch.get("outcome_label"),
-    }
-    return [
-        {"role": "assistant", "content": f"Meta-Reflection: {reflection}"},
-        {"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-
-
-def _pick_rejected_branch(record: dict[str, Any], chosen_branch: dict[str, Any], min_delta: float) -> dict[str, Any] | None:
-    answer_branch = next((branch for branch in record["branches"] if branch["action"] == "ANSWER"), None)
-    if (
-        answer_branch is not None
-        and answer_branch["action"] != chosen_branch["action"]
-        and float(chosen_branch["utility"]) - float(answer_branch["utility"]) >= min_delta
-    ):
-        return answer_branch
-    ranked = sorted(record["branches"], key=lambda item: float(item["utility"]))
-    rejected = ranked[0] if ranked else None
-    if rejected is None or rejected["action"] == chosen_branch["action"]:
-        return None
-    if float(chosen_branch["utility"]) - float(rejected["utility"]) < min_delta:
-        return None
-    return rejected
-
+# ---------------------------------------------------------------------------
+# Split assignment
+# ---------------------------------------------------------------------------
 
 def _assign_split(record: dict[str, Any], eval_datasets: set[str]) -> str:
     if record["dataset"] in eval_datasets:
@@ -128,34 +240,69 @@ def _assign_split(record: dict[str, Any], eval_datasets: set[str]) -> str:
     return "eval" if bucket == 0 else "train"
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def build_step_dpo_pairs(
     selected_records: list[dict[str, Any]],
     teacher_labels: list[dict[str, Any]],
     config: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build Step-DPO pairs from student top-k candidates ranked by U_rel.
+
+    Chosen = argmax(U_rel) with rubric_degenerate=False.
+    Rejected = min(U_rel) with different action type, gap >= min_utility_gap.
+    Pairs are truncated at action emission (no tool obs/finalize).
+    """
     teacher_by_state = _teacher_lookup(teacher_labels)
-    min_delta = float(config["mining"]["min_delta_u"])
+    pair_cfg = config.get("pair_construction", {})
+    min_utility_gap = float(pair_cfg.get("min_utility_gap", 0.2))
+    require_different_action_types = bool(pair_cfg.get("require_different_action_types", True))
     eval_datasets = set(config["datasets"]["eval"])
+
     train_pairs: list[dict[str, Any]] = []
     eval_pairs: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
 
     for record in selected_records:
-        ranked = sorted(record["branches"], key=lambda item: float(item["utility"]), reverse=True)
-        if len(ranked) < 2:
-            diagnostics.append({"state_id": record["state_id"], "reason": "not_enough_ranked_branches"})
+        state_id = record.get("state_id", "")
+        teacher_label = teacher_by_state.get(state_id)
+
+        candidates = list(record.get("candidates") or [])
+        if len(candidates) < 2:
+            diagnostics.append({
+                "state_id": state_id,
+                "reason": "not_enough_candidates",
+                "n_candidates": len(candidates),
+            })
             continue
-        chosen_branch = ranked[0]
-        rejected_branch = _pick_rejected_branch(record, chosen_branch, min_delta=min_delta)
-        if rejected_branch is None:
-            diagnostics.append({"state_id": record["state_id"], "reason": "no_clean_rejected_branch"})
+
+        scored = _score_candidates(record, teacher_label, config)
+
+        pair = _pick_chosen_rejected(
+            scored,
+            teacher_label,
+            min_utility_gap=min_utility_gap,
+            require_different_action_types=require_different_action_types,
+        )
+        if pair is None:
+            diagnostics.append({
+                "state_id": state_id,
+                "reason": "no_valid_pair",
+                "rubric_degenerate": bool(teacher_label and teacher_label.get("rubric_degenerate")),
+                "n_candidates": len(scored),
+                "u_rels": [c["u_rel"] for c in scored],
+            })
             continue
-        teacher_label = teacher_by_state.get(record["state_id"])
+
+        chosen_cand, rejected_cand = pair
         prompt_messages = _build_prompt_messages(record)
-        chosen_messages = _build_completion_messages(chosen_branch, teacher_label, role_label="chosen")
-        rejected_messages = _build_completion_messages(rejected_branch, teacher_label, role_label="rejected")
-        pair = {
-            "state_id": record["state_id"],
+        chosen_messages = _build_completion_messages(chosen_cand, teacher_label, role_label="chosen")
+        rejected_messages = _build_completion_messages(rejected_cand, teacher_label, role_label="rejected")
+
+        dpo_pair = {
+            "state_id": state_id,
             "example_id": record["example_id"],
             "dataset": record["dataset"],
             "boundary_type": record["boundary_type"],
@@ -164,22 +311,27 @@ def build_step_dpo_pairs(
             "chosen_messages": chosen_messages,
             "rejected_messages": rejected_messages,
             "prompt": _render_prompt_text(record),
-            "chosen": _render_completion_text(chosen_branch, teacher_label, role_label="chosen"),
-            "rejected": _render_completion_text(rejected_branch, teacher_label, role_label="rejected"),
-            "chosen_action": chosen_branch["action"],
-            "rejected_action": rejected_branch["action"],
+            "chosen": _render_completion_text(chosen_cand, teacher_label, role_label="chosen"),
+            "rejected": _render_completion_text(rejected_cand, teacher_label, role_label="rejected"),
+            "chosen_action": chosen_cand["action"],
+            "rejected_action": rejected_cand["action"],
             "metadata": {
                 "dataset": record["dataset"],
                 "boundary_type": record["boundary_type"],
-                "delta_u": float(chosen_branch["utility"]) - float(rejected_branch["utility"]),
-                "chosen_u": float(chosen_branch["utility"]),
-                "rejected_u": float(rejected_branch["utility"]),
-                "state_id": record["state_id"],
+                "delta_u_rel": round(chosen_cand["u_rel"] - rejected_cand["u_rel"], 6),
+                "chosen_u_rel": chosen_cand["u_rel"],
+                "rejected_u_rel": rejected_cand["u_rel"],
+                "state_id": state_id,
                 "teacher_source": None if teacher_label is None else teacher_label.get("source"),
             },
         }
         if _assign_split(record, eval_datasets) == "eval":
-            eval_pairs.append(pair)
+            eval_pairs.append(dpo_pair)
         else:
-            train_pairs.append(pair)
+            train_pairs.append(dpo_pair)
+
+    logger.info(
+        "build_step_dpo_pairs: train=%d eval=%d diagnostics=%d",
+        len(train_pairs), len(eval_pairs), len(diagnostics),
+    )
     return train_pairs, eval_pairs, diagnostics

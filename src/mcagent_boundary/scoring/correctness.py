@@ -9,10 +9,26 @@ from mcagent_core.eval.evaluate_answers import is_answer_correct
 EXPRESSION_PATTERN = re.compile(r"\d+(?:\s*[\+\-\*\/]\s*\d+)+")
 
 
-def needs_calculation(example) -> bool:
-    if example.boundary_type == "reasoning":
+def needs_calculation(example, semantic_tags: dict[str, bool] | None = None, reason_text: str | None = None) -> bool:
+    """Return True only when calculation is genuinely needed (v0.2 §Problem C).
+
+    Conditions (any one sufficient):
+    1. The question contains an explicit arithmetic expression.
+    2. semantic_tags contains CALCULATION_REQUIRED.
+    3. reasoning text explicitly mentions computation.
+
+    Does NOT return True just because boundary_type == "reasoning".
+    """
+    if EXPRESSION_PATTERN.search(example.question):
         return True
-    return bool(EXPRESSION_PATTERN.search(example.question))
+    if semantic_tags and semantic_tags.get("CALCULATION_REQUIRED"):
+        return True
+    if reason_text:
+        lower = reason_text.lower()
+        compute_keywords = ("calculat", "comput", "arithmetic", "expression", "formula", "equation", "math")
+        if any(kw in lower for kw in compute_keywords):
+            return True
+    return False
 
 
 def evaluate_branch_correctness(example, final_answer: str | None, action: str, semantic_tags: dict[str, bool]) -> bool | None:

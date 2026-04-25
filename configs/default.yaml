@@ -31,7 +31,7 @@ tools:
     online_timeout_seconds: 30
     country_code: us
     language_code: en
-    serper_api_key_env: SERPER_API_KEY
+    serper_api_key_env: “ea4470e2144099a50324ed5f2ce9cae2775ac2e6”
     serper_base_url: https://google.serper.dev/search
     brave_api_key_env: BRAVE_SEARCH_API_KEY
     brave_base_url: https://api.search.brave.com/res/v1/web/search
@@ -53,8 +53,8 @@ teacher:
   provider: poe
   model_env: POE_TEACHER_MODEL
   default_model: "gpt-4o"
-  api_key_env: POE_API_KEY
-  api_key: ""
+  api_key_env: "sk-poe-Wn8MBW1zPuTovdbXZgAZQLLsJAK5B6uS0DlmEIaWEA4"
+  api_key: "sk-poe-Wn8MBW1zPuTovdbXZgAZQLLsJAK5B6uS0DlmEIaWEA4"
   base_url_env: POE_BASE_URL
   default_base_url: "https://api.poe.com/v1"
   chat_completions_env: POE_CHAT_COMPLETIONS_URL
