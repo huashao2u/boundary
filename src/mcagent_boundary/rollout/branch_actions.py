@@ -268,43 +268,18 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         eval_cfg = config.get("eval", {})
         execute_tools = eval_cfg.get("execute_tools", True)
 
-    # If candidates is None (e.g. legacy single-decision output), synthesize a
-    # 2-candidate minimal list for compatibility, marked as debug fallback.
+    # If top-k parsing failed, keep the raw output for diagnostics and exclude
+    # the record from mining/pair construction. v0.2 forbids synthesized debug
+    # fallback candidates from entering the training pool.
     if candidates is None:
         logger.warning(
-            "example %s: policy returned no candidates (legacy single-decision output). "
-            "Synthesizing minimal 2-candidate list as debug fallback.",
+            "example %s: policy returned no valid top-k candidates; excluding from training pools.",
             example.example_id,
         )
-        natural_decision = dict(policy_output.decision)
-        natural_action = str(natural_decision.get("action", "ANSWER")).upper()
-        primary = {
-            "rank": 1,
-            "action": natural_action,
-            "confidence": natural_decision.get("confidence"),
-            "action_input": natural_decision.get("action_input", {}),
-            "brief_rationale": natural_decision.get("brief_rationale", ""),
-        }
-        if natural_action != "ANSWER":
-            answer_cand = {
-                "rank": 2,
-                "action": "ANSWER",
-                "confidence": 0.3,
-                "action_input": {"answer": ""},
-                "brief_rationale": "Fallback ANSWER candidate (legacy output).",
-            }
-            candidates = [primary, answer_cand]
-        else:
-            candidates = [primary, {
-                "rank": 2,
-                "action": "SEARCH",
-                "confidence": 0.3,
-                "action_input": {"query": example.question},
-                "brief_rationale": "Fallback SEARCH candidate (legacy output).",
-            }]
+        candidates = []
         diagnostics.append({
             "example_id": example.example_id,
-            "issue": "legacy_single_decision_fallback",
+            "issue": "invalid_candidate_output",
             "use_fallback_branches_for_training": False,
         })
 

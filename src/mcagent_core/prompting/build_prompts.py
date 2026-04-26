@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import re
+import warnings
 from typing import Any
 
 from mcagent_core.data.loaders import UnifiedSample
@@ -250,6 +252,119 @@ def _minimal_repair_action_input(action: str, action_input: Any) -> dict[str, An
     return repaired
 
 
+def _parse_jsonish(value: str) -> dict[str, Any] | None:
+    try:
+        from json_repair import repair_json
+
+        repaired = repair_json(value, return_objects=True)
+        return repaired if isinstance(repaired, dict) else None
+    except Exception:
+        pass
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            parsed = ast.literal_eval(value)
+        return parsed if isinstance(parsed, dict) else None
+    except (SyntaxError, TypeError, ValueError):
+        return None
+
+
+def _balanced_object_spans(raw_text: str) -> list[str]:
+    spans: list[str] = []
+    depth = 0
+    start: int | None = None
+    in_string = False
+    escape = False
+    quote = ""
+    for index, char in enumerate(raw_text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                in_string = False
+            continue
+        if char in {'"', "'"}:
+            in_string = True
+            quote = char
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                spans.append(raw_text[start : index + 1])
+                start = None
+    return spans
+
+
+def _candidate_payloads_from_text(raw_text: str) -> dict[str, Any] | None:
+    """Recover top-k candidate JSON from common model wrapper formats."""
+    candidates: list[dict[str, Any]] = []
+    # Free-form candidate snippets are only trusted when the model did not echo
+    # the full prompt; otherwise the one-shot example can be mistaken for output.
+    if "Hard rules" in raw_text or "Return JSON with the following schema" in raw_text:
+        return None
+    tail = raw_text
+    marker = re.search(r"candidates?\s*:", raw_text, flags=re.IGNORECASE)
+    if marker:
+        tail = raw_text[marker.end() :]
+    for span in _balanced_object_spans(tail):
+        parsed = _parse_jsonish(span)
+        if not isinstance(parsed, dict):
+            continue
+        if str(parsed.get("action", "")).upper() in ALLOWED_ACTIONS:
+            candidates.append(parsed)
+    if len(candidates) < 2:
+        return None
+    return {
+        "reasoning": {
+            "attempt": raw_text[: marker.start()].strip() if marker else "",
+            "uncertainty_summary": "",
+            "need_external_help": False,
+        },
+        "candidates": candidates[:3],
+    }
+
+
+def _student_response_region(raw_text: str) -> str:
+    marker = "Now respond for the user's question below"
+    marker_index = raw_text.rfind(marker)
+    if marker_index == -1:
+        return raw_text
+    return raw_text[marker_index + len(marker) :]
+
+
+def _candidate_output_payload(raw_text: str) -> dict[str, Any] | None:
+    response_text = _student_response_region(raw_text)
+    parsed = _parse_jsonish(response_text)
+    if isinstance(parsed, dict) and isinstance(parsed.get("candidates"), list):
+        return parsed
+
+    fenced = re.findall(r"```(?:json)?\s*(.*?)```", response_text, flags=re.DOTALL | re.IGNORECASE)
+    for block in reversed(fenced):
+        parsed = _parse_jsonish(block)
+        if isinstance(parsed, dict) and isinstance(parsed.get("candidates"), list):
+            return parsed
+
+    # Prefer complete objects with a candidates list, scanning from the end in
+    # case an instruction example was echoed before the actual answer.
+    for span in reversed(_balanced_object_spans(response_text)):
+        parsed = _parse_jsonish(span)
+        if isinstance(parsed, dict) and isinstance(parsed.get("candidates"), list):
+            return parsed
+
+    return _candidate_payloads_from_text(response_text)
+
+
 def parse_candidate_output(raw_text: str) -> dict[str, Any] | None:
     """Parse a v0.2 top-k candidate response from the student model.
 
@@ -266,23 +381,7 @@ def parse_candidate_output(raw_text: str) -> dict[str, Any] | None:
     - Ranks normalized to 1, 2, 3 after dedup/sort.
     """
     global _DIAG_COUNTS
-    parsed: dict[str, Any] | None = None
-
-    try:
-        from json_repair import repair_json
-        candidate = repair_json(raw_text, return_objects=True)
-        if isinstance(candidate, dict):
-            parsed = candidate
-    except Exception:
-        parsed = None
-
-    if parsed is None:
-        match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                parsed = None
+    parsed = _candidate_output_payload(raw_text)
 
     if parsed is None or not isinstance(parsed, dict):
         _DIAG_COUNTS["invalid_schema"] += 1

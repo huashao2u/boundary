@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -8,6 +9,9 @@ MISCONCEPTION_WORDS = ("always", "never", "is it true", "does it exist", "prove 
 SEARCH_WORDS = ("search", "look up", "verify", "retrieve", "check online", "up-to-date")
 REFUSE_WORDS = ("false premise", "cannot verify", "unjustified", "does not exist")
 CALC_WORDS = ("calculate", "compute", "equation", "solve", "find the value")
+CALC_EVIDENCE_PATTERN = re.compile(
+    r"(\d|[%$]|\\frac|\\sqrt|[+\-*/=<>]| total | sum | difference | product | twice | half | percent)"
+)
 
 
 def _normalize_text(value: Any) -> str:
@@ -31,7 +35,7 @@ def infer_semantic_tags(example, reason_prefix: str = "", history: list[dict[str
     missing_info = bool(metadata.get("vague")) or bool(metadata.get("missing_details"))
     new_or_tail = example.dataset == "mintqa" or bool(metadata.get("graph_preview")) or bool(metadata.get("source"))
     misconception_risk = false_premise or any(word in combined for word in MISCONCEPTION_WORDS)
-    calc_required = example.boundary_type == "reasoning" or any(word in combined for word in CALC_WORDS)
+    calc_required = any(word in combined for word in CALC_WORDS) or bool(CALC_EVIDENCE_PATTERN.search(f" {combined} "))
     tool_required = (
         (example.can_search and (time_sensitive or new_or_tail or any(word in combined for word in SEARCH_WORDS)))
         or (calc_required and example.can_calculate)
@@ -51,4 +55,3 @@ def infer_semantic_tags(example, reason_prefix: str = "", history: list[dict[str
 
 def active_semantic_tags(example, reason_prefix: str = "", history: list[dict[str, Any]] | None = None) -> list[str]:
     return [name for name, enabled in infer_semantic_tags(example, reason_prefix=reason_prefix, history=history).items() if enabled]
-

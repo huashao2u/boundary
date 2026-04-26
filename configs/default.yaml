@@ -1,6 +1,6 @@
 paths:
   dataset_root: ./dataset
-  model_root: ./models/qwen/Qwen2.5-7B-Instruct
+  model_root: ./models/Qwen2.5-7B-Instruct
   resource_report_output: ./outputs/resource_report.json
   search_corpus_output: ./outputs/local_search_corpus.json
   search_index_output: ./outputs/local_search_index.json
@@ -31,7 +31,7 @@ tools:
     online_timeout_seconds: 30
     country_code: us
     language_code: en
-    serper_api_key_env: “ea4470e2144099a50324ed5f2ce9cae2775ac2e6”
+    serper_api_key_env: SERPER_API_KEY
     serper_base_url: https://google.serper.dev/search
     brave_api_key_env: BRAVE_SEARCH_API_KEY
     brave_base_url: https://api.search.brave.com/res/v1/web/search
@@ -53,7 +53,7 @@ teacher:
   provider: poe
   model_env: POE_TEACHER_MODEL
   default_model: "gpt-4o"
-  api_key_env: ""
+  api_key_env: POE_API_KEY
   api_key: ""
   base_url_env: POE_BASE_URL
   default_base_url: "https://api.poe.com/v1"

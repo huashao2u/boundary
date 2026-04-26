@@ -1,7 +1,0 @@
-{
-  "num_rollouts": 200,
-  "num_boundary_candidates": 0,
-  "num_clear_answer_anchors": 0,
-  "num_clear_external_anchors": 0,
-  "num_other": 200
-}

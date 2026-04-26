@@ -105,12 +105,19 @@ def roc_auc(scores: list[float], labels: list[int]) -> float:
 class _ExampleProxy:
     """Minimal proxy so utility functions can read example attributes."""
     def __init__(self, record: dict[str, Any]) -> None:
+        metadata = dict(record.get("metadata") or {})
+        boundary_type = str(record.get("boundary_type", ""))
+        boundary_to_task = {
+            "reasoning": "math",
+            "factual": "factual_boundary",
+            "intention": "intention_boundary",
+        }
         self.question = record.get("question", "")
         self.gold_answer = record.get("gold_answer")
-        self.task_type = record.get("boundary_type", "")
-        self.metadata = record.get("metadata", {})
-        self.can_clarify = bool((record.get("metadata") or {}).get("can_clarify", True))
-        self.can_search = bool((record.get("metadata") or {}).get("can_search", True))
+        self.task_type = metadata.get("task_type") or boundary_to_task.get(boundary_type, boundary_type)
+        self.metadata = metadata
+        self.can_clarify = bool(metadata.get("can_clarify", True))
+        self.can_search = bool(metadata.get("can_search", True))
 
 
 # ---------------------------------------------------------------------------

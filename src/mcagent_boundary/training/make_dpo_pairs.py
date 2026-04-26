@@ -24,6 +24,18 @@ from mcagent_boundary.scoring.utility import utility_rel
 logger = logging.getLogger(__name__)
 
 _ACTION_SET = {"ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE"}
+_BOUNDARY_TO_TASK = {
+    "reasoning": "math",
+    "factual": "factual_boundary",
+    "intention": "intention_boundary",
+}
+_EXCLUDED_ROLLOUT_ISSUES = {
+    "invalid_candidate_output",
+    "legacy_single_decision_fallback",
+    "invalid_schema",
+    "invalid_missing_answer",
+    "invalid_single_action",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +146,12 @@ def _render_completion_text(
 class _CandidateExampleProxy:
     """Thin proxy so utility_rel can read example.question / gold_answer / metadata."""
     def __init__(self, record: dict[str, Any]) -> None:
+        metadata = dict(record.get("metadata") or {})
+        boundary_type = str(record.get("boundary_type", ""))
         self.question = record.get("question", "")
         self.gold_answer = record.get("gold_answer")
-        self.task_type = record.get("boundary_type", "")
-        self.metadata = record.get("metadata", {})
+        self.task_type = metadata.get("task_type") or _BOUNDARY_TO_TASK.get(boundary_type, boundary_type)
+        self.metadata = metadata
 
 
 def _score_candidates(
@@ -165,9 +179,10 @@ def _score_candidates(
         action = str(cand.get("action", "ANSWER")).upper()
         branch = branch_by_action.get(action) or {}
         # Compose a minimal branch dict for utility_rel
+        action_input = branch.get("action_input") or cand.get("action_input") or {}
         branch_dict: dict[str, Any] = {
             "action": action,
-            "action_input": cand.get("action_input") or branch.get("action_input") or {},
+            "action_input": action_input,
             "confidence": cand.get("confidence"),
             "brief_rationale": cand.get("brief_rationale", ""),
             # annotation branches have no observation/correctness
@@ -229,6 +244,15 @@ def _teacher_lookup(teacher_labels: list[dict[str, Any]]) -> dict[str, dict[str,
     return {record["state_id"]: record for record in teacher_labels}
 
 
+def _excluded_rollout_issues(record: dict[str, Any]) -> list[str]:
+    issues = []
+    for diagnostic in record.get("diagnostics") or []:
+        issue = str(diagnostic.get("issue", ""))
+        if issue in _EXCLUDED_ROLLOUT_ISSUES:
+            issues.append(issue)
+    return sorted(set(issues))
+
+
 # ---------------------------------------------------------------------------
 # Split assignment
 # ---------------------------------------------------------------------------
@@ -267,12 +291,26 @@ def build_step_dpo_pairs(
 
     for record in selected_records:
         state_id = record.get("state_id", "")
+        diagnostic_base = {
+            "state_id": state_id,
+            "example_id": record.get("example_id"),
+            "dataset": record.get("dataset"),
+            "boundary_type": record.get("boundary_type"),
+        }
         teacher_label = teacher_by_state.get(state_id)
+        excluded_issues = _excluded_rollout_issues(record)
+        if excluded_issues:
+            diagnostics.append({
+                **diagnostic_base,
+                "reason": "excluded_invalid_rollout",
+                "issues": excluded_issues,
+            })
+            continue
 
         candidates = list(record.get("candidates") or [])
         if len(candidates) < 2:
             diagnostics.append({
-                "state_id": state_id,
+                **diagnostic_base,
                 "reason": "not_enough_candidates",
                 "n_candidates": len(candidates),
             })
@@ -288,10 +326,11 @@ def build_step_dpo_pairs(
         )
         if pair is None:
             diagnostics.append({
-                "state_id": state_id,
+                **diagnostic_base,
                 "reason": "no_valid_pair",
                 "rubric_degenerate": bool(teacher_label and teacher_label.get("rubric_degenerate")),
                 "n_candidates": len(scored),
+                "actions": [c["action"] for c in scored],
                 "u_rels": [c["u_rel"] for c in scored],
             })
             continue

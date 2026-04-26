@@ -101,6 +101,7 @@ class DatasetAdapter(ABC):
         return {
             **original,
             "boundary_type": self.boundary_type,
+            "task_type": BOUNDARY_TO_TASK.get(self.boundary_type, "factual_boundary"),
             "can_search": self.can_search,
             "can_calculate": self.can_calculate,
             "can_clarify": self.can_clarify,
@@ -113,4 +114,3 @@ class DatasetAdapter(ABC):
     @abstractmethod
     def _convert(self, sample, split: str) -> StandardizedExample:
         raise NotImplementedError
-

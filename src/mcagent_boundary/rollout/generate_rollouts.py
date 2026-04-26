@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from mcagent_core.rollout.policy import _model_assets_available, build_policy
@@ -12,9 +13,28 @@ from mcagent_boundary.rollout.branch_actions import rollout_one_example
 logger = logging.getLogger(__name__)
 
 
+def _resolve_path(config: dict, path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (Path(config.get("_repo_root", ".")) / path).resolve()
+
+
+def _resolve_model_path(config: dict) -> Path:
+    student_cfg = config.get("student", {})
+    env_name = str(student_cfg.get("model_path_env", "STUDENT_MODEL_PATH"))
+    if os.environ.get(env_name):
+        return _resolve_path(config, os.environ[env_name])
+    if student_cfg.get("fallback_model_path"):
+        fallback = _resolve_path(config, str(student_cfg["fallback_model_path"]))
+        if _model_assets_available(str(fallback)):
+            return fallback
+    return _resolve_path(config, str(config["paths"]["model_root"]))
+
+
 def load_standardized_examples(config: dict, dataset_names: list[str], limit_per_dataset: int | None = None) -> list:
     registry = build_adapter_registry()
-    dataset_root = Path(config["paths"]["dataset_root"]).resolve()
+    dataset_root = _resolve_path(config, str(config["paths"]["dataset_root"]))
     examples = []
     default_splits = config["datasets"]["default_splits"]
     for dataset_name in dataset_names:
@@ -48,7 +68,7 @@ def _resolve_backend(requested: str, model_path: str) -> str:
 
 def generate_rollouts(config: dict, dataset_names: list[str], phase: str, limit_per_dataset: int | None = None) -> list[dict]:
     examples = load_standardized_examples(config, dataset_names=dataset_names, limit_per_dataset=limit_per_dataset)
-    model_path = str(Path(config["paths"]["model_root"]).resolve())
+    model_path = str(_resolve_model_path(config))
     backend = _resolve_backend(str(config["rollout"]["backend"]), model_path)
     rollout_cfg = config.get("rollout", {})
     policy = build_policy(
