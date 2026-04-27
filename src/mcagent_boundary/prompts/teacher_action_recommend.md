@@ -15,6 +15,9 @@ Process features (system-measured, not model self-reports):
 Known semantic hints (rule-derived, you may refine them):
 {semantic_hints}
 
+Semantic tag evidence (source/text/confidence diagnostics):
+{semantic_tag_evidence}
+
 Dataset / boundary metadata (for your context only, not for the student):
 {dataset_boundary}
 

@@ -19,10 +19,17 @@ Your tasks:
 
 Helpfulness rubric (per candidate):
 - ANSWER: high if reasoning is self-sufficient and no missing info / false premise / time-sensitive fact; low if a critical slot is missing or external evidence is needed.
-- SEARCH: high if TIME_SENSITIVE / NEW_OR_TAIL_KNOWLEDGE / TOOL_REQUIRED AND the query is specific and on-topic; low if reasoning is already sufficient or the query is vacuous.
+- SEARCH: high if SEARCH_REQUIRED / TIME_SENSITIVE / NEW_OR_TAIL_KNOWLEDGE AND the query is specific and on-topic; low if reasoning is already sufficient or the query is vacuous.
 - CALCULATE: high if CALCULATION_REQUIRED AND the expression is concrete; low if the task is not numeric.
-- CLARIFY: high if MISSING_INFO AND the clarify question targets the gap; low if the task is already answerable or the question is generic.
+- CLARIFY: high if CLARIFY_REQUIRED or critical MISSING_INFO AND the clarify question targets the gap; low if the task is already answerable or the question is generic.
 - REFUSE: high if FALSE_PREMISE or JUSTIFIED_REFUSE; low if a reasonable answer is possible.
+
+Tag definitions you must respect:
+- MISSING_INFO: only when a critical slot is absent; minor preferences do not count.
+- FALSE_PREMISE: only when the question presupposes a false fact; cannot verify is not enough.
+- MISCONCEPTION_RISK: common false belief / imitative falsehood risk, not every yes/no or prove-that question.
+- CALCULATION_REQUIRED: concrete computation materially reduces error; not every math/reasoning dataset example.
+- SEARCH_REQUIRED: external or fresh evidence is needed; TOOL_REQUIRED is only a summary and must not justify SEARCH by itself.
 
 Scoring constraints:
 - Score range [0, 1]; keep resolution at 0.1.
@@ -42,7 +49,7 @@ Return JSON with fields:
   "semantic_tags": [],
   "meta_reflection": "",
   "candidate_helpfulness": [
-    {"action": "", "score": 0.0, "reason": ""}
+    {"rank": 1, "action": "", "score": 0.0, "reason": ""}
   ],
   "recommended_action": "",
   "rationale": "",

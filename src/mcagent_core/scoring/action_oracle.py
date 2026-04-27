@@ -11,12 +11,16 @@ def choose_oracle_action(
     calculation_allowed: bool = True,
 ) -> str:
     tags = build_semantic_tags(sample) if semantic_tags is None else semantic_tags
-    if tags["MISSING_INFO"] and clarify_allowed:
+    if tags.get("CLARIFY_REQUIRED") and clarify_allowed:
         return "CLARIFY"
-    if tags["FALSE_PREMISE"] or tags["JUSTIFIED_REFUSE"]:
+    if tags.get("FALSE_PREMISE") or tags.get("JUSTIFIED_REFUSE"):
         return "REFUSE"
-    if tags["CALCULATION_REQUIRED"] and calculation_allowed:
+    if tags.get("CALCULATION_REQUIRED") and calculation_allowed:
         return "CALCULATE"
-    if tags["TOOL_REQUIRED"] and retrieval_allowed:
+    if (
+        tags.get("SEARCH_REQUIRED")
+        or tags.get("TIME_SENSITIVE")
+        or tags.get("NEW_OR_TAIL_KNOWLEDGE")
+    ) and retrieval_allowed:
         return "SEARCH"
     return "ANSWER"

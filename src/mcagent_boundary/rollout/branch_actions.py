@@ -19,29 +19,22 @@ Debug fallback branches never enter training pairs (use_fallback_branches_for_tr
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
 from mcagent_boundary.envs.sandbox import BoundarySandbox
-from mcagent_boundary.features.process_features import compute_process_features
-from mcagent_boundary.features.semantic_tags import active_semantic_tags, infer_semantic_tags
+from mcagent_boundary.features.process_features import compute_process_feature_details
+from mcagent_boundary.features.semantic_tags import infer_semantic_tag_details
+from mcagent_boundary.rollout.candidate_schema import (
+    canonicalize_candidates,
+    valid_candidates,
+)
 from mcagent_boundary.rollout.state import build_state
 from mcagent_boundary.scoring.correctness import evaluate_branch_correctness
 
 
 PROMPT_ROOT = Path(__file__).resolve().parents[1] / "prompts"
-EXPRESSION_PATTERN = re.compile(r"(\d+(?:\s*[\+\-\*\/]\s*\d+)+)")
 logger = logging.getLogger(__name__)
-
-REQUIRED_ACTION_INPUT_KEYS = {
-    "ANSWER": "answer",
-    "SEARCH": "query",
-    "CALCULATE": "expression",
-    "CLARIFY": "question",
-    "REFUSE": "reason",
-}
-
 
 def _read_prompt(name: str) -> str:
     return (PROMPT_ROOT / name).read_text(encoding="utf-8")
@@ -69,34 +62,17 @@ def _fallback_reason(example, semantic_tags: dict[str, bool]) -> str:
         return "The premise may be false, so I should not answer as if it were true."
     if semantic_tags.get("CALCULATION_REQUIRED"):
         return "A calculation step may be needed before trusting a direct answer."
-    if semantic_tags.get("TOOL_REQUIRED"):
+    if semantic_tags.get("SEARCH_REQUIRED"):
         return "External evidence may be needed before answering confidently."
     return "The task seems self-contained enough to consider a direct answer."
 
 
-def _validate_action_input(action: str, action_input: Any) -> tuple[dict[str, Any], bool]:
-    """Validate and minimally repair action_input. Returns (repaired, is_valid).
-
-    Repair only fills missing required keys with empty string.
-    Gold is NEVER injected.
-    """
-    if not isinstance(action_input, dict):
-        action_input = {}
-    required = REQUIRED_ACTION_INPUT_KEYS.get(action)
-    if required is None:
-        return dict(action_input), True
-    value = action_input.get(required)
-    if isinstance(value, str) and value.strip():
-        return dict(action_input), True
-    if value not in (None, "", {}, []):
-        return dict(action_input), True
-    repaired = dict(action_input)
-    repaired[required] = ""
-    return repaired, False  # repaired but was invalid (empty required field)
-
-
 def _finalize_after_tool_heuristic(action: str, observation: dict[str, Any]) -> tuple[str | None, str]:
-    """Simple heuristic finalize used when policy.finalize_after_tool is unavailable."""
+    """Simple heuristic finalize used when policy.finalize_after_tool is unavailable.
+
+    DEPRECATED(mainline): this eval-only fallback is not part of train-side
+    boundary mining or pair construction.
+    """
     if action == "SEARCH":
         results = observation.get("results") or []
         return (results[0] if results else None), "answered_after_search"
@@ -127,7 +103,8 @@ def _run_finalize_pass(policy, sample, candidate: dict[str, Any], observation: d
         )
         if hasattr(policy, "finalize_after_tool"):
             return policy.finalize_after_tool(sample, candidate, observation)
-        # Fallback: use heuristic finalize.
+        # DEPRECATED(mainline): eval-only fallback when a policy lacks a
+        # finalize method; never used by train-side annotation.
         final_answer, final_status = _finalize_after_tool_heuristic(candidate["action"], observation)
         return {"final_answer": final_answer or "", "final_status": final_status}
     except Exception as exc:
@@ -155,20 +132,23 @@ def _build_annotation_branches(
     branches: list[dict[str, Any]] = []
     for candidate in candidates:
         action = candidate["action"]
-        action_input, was_valid = _validate_action_input(action, candidate.get("action_input", {}))
+        action_input = candidate.get("canonical_action_input") or candidate.get("action_input", {})
+        was_valid = bool(candidate.get("valid_candidate"))
         if not was_valid:
-            logger.debug(
-                "annotation branch %s for %s: action_input repaired (empty required field)",
-                action, example_id,
-            )
             diagnostics.append({
                 "example_id": example_id,
                 "action": action,
-                "issue": "empty_required_field_repaired",
+                "rank": candidate.get("rank"),
+                "issue": "invalid_action_input_after_canonicalization",
+                "schema_diagnostics": candidate.get("schema_diagnostics", []),
             })
+            continue
         branches.append({
             "action": action,
             "action_input": action_input,
+            "canonical_action_input": action_input,
+            "valid_candidate": True,
+            "schema_diagnostics": candidate.get("schema_diagnostics", []),
             "confidence": candidate.get("confidence"),
             "brief_rationale": candidate.get("brief_rationale", ""),
             "rank": candidate.get("rank"),
@@ -200,13 +180,17 @@ def _build_eval_branches(
     legacy_sample = example.to_legacy_sample()
     for candidate in candidates:
         action = candidate["action"]
-        action_input, was_valid = _validate_action_input(action, candidate.get("action_input", {}))
+        action_input = candidate.get("canonical_action_input") or candidate.get("action_input", {})
+        was_valid = bool(candidate.get("valid_candidate"))
         if not was_valid:
             diagnostics.append({
                 "example_id": example_id,
                 "action": action,
-                "issue": "empty_required_field_repaired",
+                "rank": candidate.get("rank"),
+                "issue": "invalid_action_input_after_canonicalization",
+                "schema_diagnostics": candidate.get("schema_diagnostics", []),
             })
+            continue
         sandbox = BoundarySandbox(example=example, config=config, phase=phase)
         if action == "ANSWER":
             observation, done, info = {"answer": action_input.get("answer", "")}, True, {}
@@ -223,6 +207,9 @@ def _build_eval_branches(
         branches.append({
             "action": action,
             "action_input": action_input,
+            "canonical_action_input": action_input,
+            "valid_candidate": True,
+            "schema_diagnostics": candidate.get("schema_diagnostics", []),
             "confidence": candidate.get("confidence"),
             "brief_rationale": candidate.get("brief_rationale", ""),
             "rank": candidate.get("rank"),
@@ -250,15 +237,12 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
     legacy_sample = example.to_legacy_sample()
     policy_output = policy.generate_decision(legacy_sample, prompt_text)
 
-    base_semantic_tags = infer_semantic_tags(example, reason_prefix=policy_output.reason)
+    base_semantic_details = infer_semantic_tag_details(example, reason_prefix=policy_output.reason)
+    base_semantic_tags = dict(base_semantic_details["semantic_tags"])
+    semantic_tag_evidence = dict(base_semantic_details.get("semantic_tag_evidence") or {})
     reason_prefix = policy_output.reason or _fallback_reason(example, base_semantic_tags)
-    process_features = compute_process_features(
-        reason_prefix=reason_prefix,
-        raw_text=policy_output.raw_text,
-        token_threshold=int(config["features"]["long_reason_token_threshold"]),
-    )
 
-    candidates = policy_output.candidates
+    raw_candidates = policy_output.candidates
     diagnostics: list[dict[str, Any]] = []
 
     # Determine annotation vs eval mode.
@@ -271,38 +255,75 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
     # If top-k parsing failed, keep the raw output for diagnostics and exclude
     # the record from mining/pair construction. v0.2 forbids synthesized debug
     # fallback candidates from entering the training pool.
-    if candidates is None:
+    if raw_candidates is None:
         logger.warning(
             "example %s: policy returned no valid top-k candidates; excluding from training pools.",
             example.example_id,
         )
-        candidates = []
+        raw_candidates = []
         diagnostics.append({
             "example_id": example.example_id,
             "issue": "invalid_candidate_output",
             "use_fallback_branches_for_training": False,
         })
 
+    candidates = canonicalize_candidates(raw_candidates)
+    for candidate in candidates:
+        if not candidate.get("valid_candidate"):
+            diagnostics.append({
+                "example_id": example.example_id,
+                "action": candidate.get("action"),
+                "rank": candidate.get("rank"),
+                "issue": "dropped_invalid_candidate",
+                "schema_diagnostics": candidate.get("schema_diagnostics", []),
+            })
+
+    valid_candidate_list = valid_candidates(candidates)
+    empty_action_input_count = sum(
+        1
+        for candidate in candidates
+        if not candidate.get("valid_candidate")
+        and any(
+            diag.get("issue") == "empty_required_action_input"
+            for diag in (candidate.get("schema_diagnostics") or [])
+        )
+    )
+
+    process_details = compute_process_feature_details(
+        reason_prefix=reason_prefix,
+        raw_text=policy_output.raw_text,
+        token_threshold=int(config["features"]["long_reason_token_threshold"]),
+        reasoning_attempt=policy_output.reasoning_attempt,
+        candidate_confidences=[candidate.get("confidence") for candidate in valid_candidate_list],
+        action_probabilities=policy_output.action_probabilities,
+        action_scores=policy_output.action_scores,
+        confidence_source=policy_output.confidence_source,
+    )
+    process_features = dict(process_details["features"])
+    process_feature_diagnostics = dict(process_details.get("diagnostics") or {})
+
     # Build branches (annotation or eval).
     if execute_tools:
         branches = _build_eval_branches(
-            candidates, example, base_semantic_tags, config, phase, policy, diagnostics,
+            valid_candidate_list, example, base_semantic_tags, config, phase, policy, diagnostics,
             example.example_id,
         )
     else:
         branches = _build_annotation_branches(
-            candidates, example, base_semantic_tags, diagnostics, example.example_id
+            valid_candidate_list, example, base_semantic_tags, diagnostics, example.example_id
         )
 
     # Build ranked_actions placeholder (utility_rel computed downstream).
     ranked_actions = [
         {"action": c["action"], "rank": c.get("rank", i + 1), "confidence": c.get("confidence")}
-        for i, c in enumerate(candidates)
+        for i, c in enumerate(valid_candidate_list)
     ]
-    candidate_actions_map = {c["action"]: c for c in candidates}
-    best_action = candidates[0]["action"] if candidates else None
+    best_action = valid_candidate_list[0]["action"] if valid_candidate_list else None
 
-    resolved_active_tags = active_semantic_tags(example, reason_prefix=reason_prefix)
+    resolved_semantic_details = infer_semantic_tag_details(example, reason_prefix=reason_prefix)
+    base_semantic_tags = dict(resolved_semantic_details["semantic_tags"])
+    resolved_active_tags = list(resolved_semantic_details["active_semantic_tags"])
+    semantic_tag_evidence = dict(resolved_semantic_details.get("semantic_tag_evidence") or semantic_tag_evidence)
     state = build_state(
         example=example,
         reason_prefix=reason_prefix,
@@ -310,6 +331,7 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         process_features=process_features,
         semantic_tags=base_semantic_tags,
         active_semantic_tags=resolved_active_tags,
+        semantic_tag_evidence=semantic_tag_evidence,
     )
 
     return {
@@ -327,16 +349,24 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         "reasoning_attempt": policy_output.reasoning_attempt,
         "uncertainty_summary": policy_output.uncertainty_summary,
         "process_features": process_features,
+        "process_feature_diagnostics": process_feature_diagnostics,
         "semantic_tags": base_semantic_tags,
-        "active_semantic_tags": [name for name, enabled in base_semantic_tags.items() if enabled],
+        "active_semantic_tags": resolved_active_tags,
+        "semantic_tag_evidence": semantic_tag_evidence,
         "candidates": candidates,
+        "valid_candidate_count": len(valid_candidate_list),
+        "invalid_candidate_count": len(candidates) - len(valid_candidate_list),
+        "empty_action_input_count": empty_action_input_count,
         "branches": branches,
         "branch_summaries": [_branch_summary(b) for b in branches],
         "ranked_actions": ranked_actions,
         "best_action": best_action,
-        "natural_action": candidates[0]["action"] if candidates else None,
-        "natural_action_confidence": candidates[0].get("confidence") if candidates else None,
-        "natural_action_input": candidates[0].get("action_input", {}) if candidates else {},
+        "natural_action": valid_candidate_list[0]["action"] if valid_candidate_list else None,
+        "natural_action_confidence": valid_candidate_list[0].get("confidence") if valid_candidate_list else None,
+        "natural_action_input": valid_candidate_list[0].get("action_input", {}) if valid_candidate_list else {},
+        "action_scores": policy_output.action_scores,
+        "action_probabilities": policy_output.action_probabilities,
+        "confidence_source": policy_output.confidence_source,
         "execute_tools": execute_tools,
         "diagnostics": diagnostics,
         "raw_policy_text": policy_output.raw_text,

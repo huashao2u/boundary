@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
+
+from mcagent_boundary.rollout.candidate_schema import is_valid_candidate, required_input_value
 
 
 def _stable_process(process_features: dict[str, bool]) -> bool:
@@ -16,9 +19,9 @@ _EXCLUDED_ROLLOUT_ISSUES = {
 }
 
 _ACTION_TAGS = {
-    "SEARCH": ("TIME_SENSITIVE", "NEW_OR_TAIL_KNOWLEDGE", "TOOL_REQUIRED"),
+    "SEARCH": ("SEARCH_REQUIRED", "TIME_SENSITIVE", "NEW_OR_TAIL_KNOWLEDGE"),
     "CALCULATE": ("CALCULATION_REQUIRED",),
-    "CLARIFY": ("MISSING_INFO",),
+    "CLARIFY": ("CLARIFY_REQUIRED", "MISSING_INFO"),
     "REFUSE": ("FALSE_PREMISE", "JUSTIFIED_REFUSE"),
 }
 
@@ -48,6 +51,10 @@ def _candidate_actions(candidates: list[dict[str, Any]]) -> list[str]:
     return actions
 
 
+def _valid_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [candidate for candidate in candidates if is_valid_candidate(candidate)]
+
+
 def _confidence_margin(candidates: list[dict[str, Any]]) -> float | None:
     if len(candidates) < 2:
         return None
@@ -56,6 +63,16 @@ def _confidence_margin(candidates: list[dict[str, Any]]) -> float | None:
     if first is None or second is None:
         return None
     return abs(first - second)
+
+
+def _u_rel_margin(candidates: list[dict[str, Any]]) -> float | None:
+    values = sorted(
+        [value for value in (_as_float(candidate.get("u_rel")) for candidate in candidates) if value is not None],
+        reverse=True,
+    )
+    if len(values) < 2:
+        return None
+    return abs(values[0] - values[1])
 
 
 def _semantic_supports(action: str, semantic_tags: dict[str, bool]) -> bool:
@@ -71,6 +88,24 @@ def _has_non_answer_pressure(natural_action: str, actions: list[str], semantic_t
     return "ANSWER" in actions
 
 
+def _has_real_action_competition(
+    natural_action: str,
+    actions: list[str],
+    candidates: list[dict[str, Any]],
+    semantic_tags: dict[str, bool],
+    competition_window: float,
+) -> bool:
+    confidence_margin = _confidence_margin(candidates)
+    if confidence_margin is not None and confidence_margin <= competition_window:
+        return True
+    u_rel_margin = _u_rel_margin(candidates)
+    if u_rel_margin is not None and u_rel_margin <= competition_window:
+        return True
+    if _has_non_answer_pressure(natural_action, actions, semantic_tags):
+        return True
+    return False
+
+
 def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]]) -> tuple[float, list[str]]:
     process_features = rollout.get("process_features") or {}
     semantic_tags = rollout.get("semantic_tags") or {}
@@ -81,10 +116,10 @@ def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]]) -
     score = 0.0
 
     process_weights = {
-        "LOW_LOGIT_MARGIN": 0.25,
-        "HIGH_BRANCHING": 0.20,
-        "STRUGGLE_LONG": 0.15,
-        "HAS_SELF_REPAIR": 0.15,
+        "LOW_LOGIT_MARGIN": 0.08,
+        "HIGH_BRANCHING": 0.06,
+        "STRUGGLE_LONG": 0.04,
+        "HAS_SELF_REPAIR": 0.04,
     }
     for feature, weight in process_weights.items():
         if process_features.get(feature):
@@ -114,7 +149,7 @@ def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]]) -
 
     for action in actions:
         if action != "ANSWER" and _semantic_supports(action, semantic_tags):
-            score += 0.05
+            score += 0.04
             reasons.append(f"semantic_supports_{action.lower()}")
 
     return round(score, 6), reasons
@@ -126,6 +161,13 @@ def _legacy_utility_pool(
     competition_window: float,
     anchor_margin: float,
 ) -> dict[str, Any] | None:
+    """Classify pre-v0.2 rollout records that already contain utility fields.
+
+    DEPRECATED(mainline): current rollout records do not populate
+    candidate_utilities / ranked_actions[*].utility before teacher labeling.
+    The active path below uses student candidate competition, process features,
+    and semantic tags instead.
+    """
     ranked = rollout.get("ranked_actions") or []
     utilities = rollout.get("candidate_utilities") or {}
     if len(ranked) < 2 or not utilities or "utility" not in ranked[0]:
@@ -167,17 +209,45 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
     clear_answer: list[dict[str, Any]] = []
     clear_external: list[dict[str, Any]] = []
     other: list[dict[str, Any]] = []
+    pool_distribution: Counter[str] = Counter()
+    tag_distribution: Counter[str] = Counter()
+    reason_distribution: Counter[str] = Counter()
+    total_candidates = 0
+    invalid_candidates = 0
+    empty_action_input_count = 0
 
     for rollout in rollouts:
+        semantic_tags = rollout.get("semantic_tags") or {}
+        for tag, enabled in semantic_tags.items():
+            if enabled:
+                tag_distribution[tag] += 1
+
         excluded_issues = _excluded_rollout_issues(rollout)
         if excluded_issues:
-            other.append({**rollout, "pool": "other", "pool_reason": "excluded_invalid_rollout", "excluded_issues": excluded_issues})
+            record = {**rollout, "pool": "other", "pool_reason": "excluded_invalid_rollout", "excluded_issues": excluded_issues}
+            other.append(record)
+            pool_distribution["other"] += 1
+            reason_distribution["excluded_invalid_rollout"] += 1
             continue
 
-        legacy_pool = _legacy_utility_pool(rollout, min_delta, competition_window, anchor_margin)
+        raw_candidates = list(rollout.get("candidates") or [])
+        valid_candidate_list = _valid_candidates(raw_candidates)
+        total_candidates += len(raw_candidates)
+        invalid_candidates += len(raw_candidates) - len(valid_candidate_list)
+        empty_action_input_count += int(rollout.get("empty_action_input_count") or 0)
+
+        rollout_for_pool = {
+            **rollout,
+            "candidates": valid_candidate_list,
+            "num_valid_candidates": len(valid_candidate_list),
+            "invalid_candidate_count": len(raw_candidates) - len(valid_candidate_list),
+        }
+
+        legacy_pool = _legacy_utility_pool(rollout_for_pool, min_delta, competition_window, anchor_margin)
         if legacy_pool is not None:
             pool = legacy_pool["pool"]
             record = legacy_pool["record"]
+            pool_distribution[pool] += 1
             if pool == "clear_answer_anchor":
                 clear_answer.append(record)
             elif pool == "clear_external_anchor":
@@ -188,40 +258,90 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
                 other.append(record)
             continue
 
-        candidates = list(rollout.get("candidates") or [])
+        candidates = valid_candidate_list
         actions = _candidate_actions(candidates)
-        if len(actions) < 2 or "ANSWER" not in actions:
-            other.append({**rollout, "pool": "other", "pool_reason": "insufficient_valid_candidates"})
+        if not candidates:
+            reason = "not_enough_valid_candidates"
+            other.append({**rollout_for_pool, "pool": "other", "pool_reason": reason})
+            pool_distribution["other"] += 1
+            reason_distribution[reason] += 1
             continue
 
-        score, reasons = _boundary_score(rollout, candidates)
-        natural_action = str(rollout.get("natural_action") or actions[0]).upper()
+        score, reasons = _boundary_score(rollout_for_pool, candidates)
+        natural_action = str(candidates[0].get("action") or rollout.get("natural_action") or actions[0]).upper()
         stable = _stable_process(rollout.get("process_features") or {})
-        high_confidence = (_as_float(rollout.get("natural_action_confidence")) or 0.0) >= 0.75
+        high_confidence = (_as_float(candidates[0].get("confidence")) or 0.0) >= 0.75
+        real_competition = _has_real_action_competition(
+            natural_action,
+            actions,
+            candidates,
+            semantic_tags,
+            competition_window,
+        )
         enriched = {
-            **rollout,
+            **rollout_for_pool,
             "boundary_score": score,
             "utility_gap": score,
             "candidate_actions": actions,
             "boundary_reasons": reasons,
+            "has_real_action_competition": real_competition,
         }
+        boundary_candidate_ready = (
+            len(candidates) >= 2
+            and len(actions) >= 2
+            and "ANSWER" in actions
+            and any(action != "ANSWER" for action in actions)
+        )
 
-        if stable and high_confidence and natural_action == "ANSWER" and not _has_non_answer_pressure(natural_action, actions, rollout.get("semantic_tags") or {}):
+        if (
+            stable
+            and high_confidence
+            and natural_action == "ANSWER"
+            and required_input_value(candidates[0])
+            and not _has_non_answer_pressure(natural_action, actions, semantic_tags)
+        ):
             clear_answer.append({**enriched, "pool": "clear_answer_anchor"})
-        elif stable and high_confidence and natural_action != "ANSWER" and _semantic_supports(natural_action, rollout.get("semantic_tags") or {}):
+            pool_distribution["clear_answer_anchor"] += 1
+        elif (
+            stable
+            and high_confidence
+            and natural_action != "ANSWER"
+            and required_input_value(candidates[0])
+            and _semantic_supports(natural_action, semantic_tags)
+        ):
             clear_external.append({**enriched, "pool": "clear_external_anchor"})
-        elif score >= min_delta:
+            pool_distribution["clear_external_anchor"] += 1
+        elif not boundary_candidate_ready:
+            reason = "not_enough_valid_candidates" if len(candidates) < 2 else "missing_answer_or_external_competitor"
+            other.append({**enriched, "pool": "other", "pool_reason": reason})
+            pool_distribution["other"] += 1
+            reason_distribution[reason] += 1
+        elif score >= min_delta and real_competition:
             boundary_candidates.append({**enriched, "pool": "boundary_critical"})
+            pool_distribution["boundary_critical"] += 1
+            for reason in reasons:
+                reason_distribution[reason] += 1
         else:
-            other.append({**enriched, "pool": "other", "pool_reason": "low_boundary_score"})
+            reason = "no_real_action_competition" if score >= min_delta else "low_boundary_score"
+            other.append({**enriched, "pool": "other", "pool_reason": reason})
+            pool_distribution["other"] += 1
+            reason_distribution[reason] += 1
 
     return {
         "summary": {
             "num_rollouts": len(rollouts),
+            "num_valid_candidates": total_candidates - invalid_candidates,
+            "invalid_candidate_rate": (invalid_candidates / total_candidates) if total_candidates else 0.0,
+            "empty_action_input_count": empty_action_input_count,
             "num_boundary_candidates": len(boundary_candidates),
             "num_clear_answer_anchors": len(clear_answer),
             "num_clear_external_anchors": len(clear_external),
             "num_other": len(other),
+            "pool_distribution": dict(pool_distribution),
+            "tag_distribution": dict(tag_distribution),
+            "boundary_reason_distribution": dict(reason_distribution),
+            "clear_answer_anchor_count": len(clear_answer),
+            "clear_external_anchor_count": len(clear_external),
         },
         "boundary_candidates": boundary_candidates,
         "clear_answer_anchors": clear_answer,

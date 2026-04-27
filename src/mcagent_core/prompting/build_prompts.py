@@ -30,6 +30,12 @@ def get_diagnostics_counts() -> dict[str, int]:
     return dict(_DIAG_COUNTS)
 
 
+# DEPRECATED(mainline): the legacy single-decision prompt helpers below are not
+# used by current boundary v0.2 rollouts. The active student prompt is
+# mcagent_boundary.rollout.branch_actions.build_student_prompt plus
+# prompts/student_rollout.md, and parse_candidate_output() is the active parser.
+
+
 def build_system_prompt(enable_tool_schema: bool = True) -> str:
     schema_hint = (
         "Return valid JSON only. The `decision.action` must be one of "
@@ -159,6 +165,12 @@ def _keyword_fallback_action(raw_text: str) -> str:
 
 
 def parse_decision_output(raw_text: str) -> dict[str, Any]:
+    """Parse legacy single-decision output.
+
+    DEPRECATED(mainline): retained only to preserve diagnostics when a model
+    ignores the v0.2 top-k candidate schema. Such records are excluded from
+    mining/pair construction as invalid_candidate_output.
+    """
     parsed: dict[str, Any] | None = None
     try:
         from json_repair import repair_json
@@ -196,16 +208,6 @@ def parse_decision_output(raw_text: str) -> dict[str, Any]:
     action_input = decision.get("action_input", {}) or {}
     if not isinstance(action_input, dict):
         action_input = {}
-    if action == "ANSWER" and "answer" not in action_input:
-        action_input = {"answer": ""}
-    if action == "SEARCH" and "query" not in action_input:
-        action_input = {"query": ""}
-    if action == "CALCULATE" and "expression" not in action_input:
-        action_input = {"expression": ""}
-    if action == "CLARIFY" and "question" not in action_input:
-        action_input = {"question": ""}
-    if action == "REFUSE" and "reason" not in action_input:
-        action_input = {"reason": ""}
     confidence = decision.get("confidence")
     try:
         confidence = None if confidence is None else max(0.0, min(1.0, float(confidence)))
@@ -236,20 +238,14 @@ _REQUIRED_ACTION_INPUT_KEYS = {
 
 
 def _minimal_repair_action_input(action: str, action_input: Any) -> dict[str, Any]:
-    """Minimally repair an action_input dict — never inject gold data."""
+    """Return a dict-shaped action_input without making empty fields trainable.
+
+    Canonicalization and validity live in mcagent_boundary.rollout.candidate_schema
+    after parsing. The parser only preserves what the student actually supplied.
+    """
     if not isinstance(action_input, dict):
-        action_input = {}
-    required_key = _REQUIRED_ACTION_INPUT_KEYS.get(action)
-    if required_key is None:
-        return action_input
-    value = action_input.get(required_key)
-    if isinstance(value, str) and value.strip():
-        return action_input
-    if value not in (None, "", {}, []):
-        return action_input
-    repaired = dict(action_input)
-    repaired[required_key] = ""
-    return repaired
+        return {}
+    return dict(action_input)
 
 
 def _parse_jsonish(value: str) -> dict[str, Any] | None:

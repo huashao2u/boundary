@@ -1,7 +1,7 @@
 student:
   name: qwen2.5-7b-instruct
   model_path_env: STUDENT_MODEL_PATH
-  fallback_model_path: ./models/qwen/Qwen2.5-7B-Instruct
+  fallback_model_path: ./models/Qwen2.5-7B-Instruct
 
 teacher:
   provider: poe

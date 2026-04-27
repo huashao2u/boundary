@@ -44,8 +44,7 @@
           }
         },
         "required": [
-          "question",
-          "slot"
+          "question"
         ]
       }
     },
@@ -66,4 +65,3 @@
     }
   ]
 }
-

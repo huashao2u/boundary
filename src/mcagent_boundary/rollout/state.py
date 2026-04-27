@@ -78,6 +78,7 @@ def build_state(
     process_features: dict[str, bool],
     semantic_tags: dict[str, bool],
     active_semantic_tags: list[str],
+    semantic_tag_evidence: dict[str, Any] | None = None,
 ) -> BoundaryState:
     """Construct a :class:`BoundaryState` from the pieces a rollout already computes.
 
@@ -96,6 +97,7 @@ def build_state(
         "process_features": dict(process_features),
         "semantic_tags": dict(semantic_tags),
         "active_semantic_tags": list(active_semantic_tags),
+        "semantic_tag_evidence": dict(semantic_tag_evidence or {}),
         "metadata": metadata,
     }
     return BoundaryState(

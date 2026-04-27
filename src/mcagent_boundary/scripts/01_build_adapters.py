@@ -10,26 +10,43 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from mcagent_boundary.config import load_boundary_config, resolve_repo_path
 from mcagent_boundary.io import write_json, write_jsonl
+from mcagent_boundary.progress import make_progress
 from mcagent_boundary.rollout.generate_rollouts import load_standardized_examples
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Materialize standardized adapter outputs.")
     parser.add_argument("--limit-per-dataset", type=int, default=None)
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
 
     config = load_boundary_config()
     adapter_cache_dir = resolve_repo_path(config["paths"]["adapter_cache_dir"], config)
     adapter_cache_dir.mkdir(parents=True, exist_ok=True)
     summary: dict[str, dict] = {}
-    for split_name in ("train", "eval"):
+    split_iter = make_progress(
+        ("train", "eval"),
+        total=2,
+        desc="adapter splits",
+        unit="split",
+        disable=args.no_progress,
+    )
+    for split_name in split_iter:
         datasets = list(config["datasets"][split_name])
         examples = load_standardized_examples(
             config,
             dataset_names=datasets,
             limit_per_dataset=args.limit_per_dataset if args.limit_per_dataset is not None else config["rollout"]["limit_per_dataset"],
+            show_progress=not args.no_progress,
         )
-        for dataset in datasets:
+        dataset_iter = make_progress(
+            datasets,
+            total=len(datasets),
+            desc=f"write {split_name} adapters",
+            unit="dataset",
+            disable=args.no_progress,
+        )
+        for dataset in dataset_iter:
             subset = [example.to_record() for example in examples if example.dataset == dataset]
             output_path = adapter_cache_dir / f"{split_name}_{dataset}.jsonl"
             write_jsonl(output_path, subset)

@@ -27,13 +27,29 @@ def teacher_helpfulness(branch: dict[str, Any], teacher_label: dict[str, Any] | 
         return 0.5
     helpfulness_list = teacher_label.get("candidate_helpfulness") or []
     action = str(branch.get("action", "")).upper()
+    rank = branch.get("rank")
+    try:
+        rank = None if rank is None else int(rank)
+    except (TypeError, ValueError):
+        rank = None
+    fallback_score: float | None = None
     for entry in helpfulness_list:
-        if isinstance(entry, dict) and str(entry.get("action", "")).upper() == action:
-            try:
-                return max(0.0, min(1.0, float(entry["score"])))
-            except (KeyError, TypeError, ValueError):
-                return 0.5
-    return 0.5
+        if not isinstance(entry, dict) or str(entry.get("action", "")).upper() != action:
+            continue
+        try:
+            score = max(0.0, min(1.0, float(entry["score"])))
+        except (KeyError, TypeError, ValueError):
+            score = 0.5
+        entry_rank = entry.get("rank")
+        try:
+            entry_rank = None if entry_rank is None else int(entry_rank)
+        except (TypeError, ValueError):
+            entry_rank = None
+        if rank is not None and entry_rank == rank:
+            return score
+        if fallback_score is None:
+            fallback_score = score
+    return 0.5 if fallback_score is None else fallback_score
 
 
 # ---------------------------------------------------------------------------
@@ -80,9 +96,9 @@ def _search_helpful(
         return False
     answer_branch = branch_map.get("ANSWER", {})
     needs_external = (
-        semantic_tags.get("TIME_SENSITIVE")
+        semantic_tags.get("SEARCH_REQUIRED")
+        or semantic_tags.get("TIME_SENSITIVE")
         or semantic_tags.get("NEW_OR_TAIL_KNOWLEDGE")
-        or semantic_tags.get("TOOL_REQUIRED")
     )
     answer_wrong = answer_branch.get("correctness") is not True
     return branch.get("correctness") is True and (answer_wrong or needs_external)
@@ -112,7 +128,7 @@ def _calculate_helpful(
 def _clarify_helpful(branch: dict[str, Any], semantic_tags: dict[str, bool]) -> bool:
     """CLARIFY is helpful only when MISSING_INFO is present and a meaningful reply was received."""
     observation = branch.get("observation") or {}
-    return bool(semantic_tags.get("MISSING_INFO") and observation.get("user_reply"))
+    return bool((semantic_tags.get("CLARIFY_REQUIRED") or semantic_tags.get("MISSING_INFO")) and observation.get("user_reply"))
 
 
 def _refuse_justified(
@@ -123,13 +139,16 @@ def _refuse_justified(
 ) -> bool:
     """REFUSE is justified based on semantic tags and structural properties."""
     answer_branch = branch_map.get("ANSWER", {})
+    metadata = dict(getattr(example, "metadata", {}) or {})
+    search_unavailable = not bool(getattr(example, "can_search", metadata.get("can_search", False)))
+    clarify_unavailable = not bool(getattr(example, "can_clarify", metadata.get("can_clarify", False)))
     return bool(
         semantic_tags.get("FALSE_PREMISE")
         or semantic_tags.get("JUSTIFIED_REFUSE")
-        or (semantic_tags.get("MISSING_INFO") and not example.can_clarify)
+        or (semantic_tags.get("MISSING_INFO") and clarify_unavailable)
         or (
-            semantic_tags.get("TOOL_REQUIRED")
-            and not example.can_search
+            semantic_tags.get("SEARCH_REQUIRED")
+            and search_unavailable
             and answer_branch.get("correctness") is not True
         )
     )

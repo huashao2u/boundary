@@ -2,6 +2,10 @@ from __future__ import annotations
 
 """0x_calibrate_relative_utility.py — v0.2 calibration script.
 
+Auxiliary only: this script is not part of the main artifact-building path.
+It may synthesize rule-fallback teacher labels for calibration diagnostics, so
+its outputs must not be mixed into strict training pair construction.
+
 Loads held-out rollout records, computes U_rel (relative, training estimator)
 and U_real (outcome-based, eval estimator), then reports calibration metrics:
   - Spearman ρ and Kendall τ between U_rel and U_real

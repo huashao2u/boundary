@@ -5,7 +5,7 @@ paths:
   repo_root: .
   shared_core_root: ./src/mcagent_core
   dataset_root: ./dataset
-  model_root: ./models/qwen/Qwen2.5-7B-Instruct
+  model_root: ./models/Qwen2.5-7B-Instruct
   work_root: .
   adapter_cache_dir: ./artifacts/adapters
   rollout_output: ./artifacts/rollouts/all_rollouts.jsonl

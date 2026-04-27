@@ -56,6 +56,9 @@ ACTION_SPACE = ("ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE")
 class HeuristicPolicy:
     """Oracle-style fallback policy for smoke tests, ablations, and missing-asset fallback.
 
+    DEPRECATED(mainline): this is not a valid source of training artifacts for
+    the boundary-collapse study because it can read gold labels.
+
     WARNING: This policy reads ``sample.gold_answer`` and
     ``sample.metadata["gold_clarify_question"]`` when constructing action inputs, so its
     "natural" decisions are gold-label-leaking. It MUST NOT be used as the default
@@ -98,7 +101,8 @@ class HeuristicPolicy:
             "action_input": self._build_action_input(action, sample),
             "brief_rationale": self._build_rationale(action, sample, tags),
         }
-        # Build a minimal 2-candidate list for v0.2 compatibility (smoke only).
+        # DEPRECATED(mainline): smoke-only candidate synthesis. These candidates
+        # are gold-leaking and must not enter training artifacts.
         primary_candidate = {
             "rank": 1,
             "action": action,
@@ -295,7 +299,9 @@ class HFLocalPolicy:
                 candidates=candidates,
             )
 
-        # Fallback: legacy single-decision parse.
+        # DEPRECATED(mainline): legacy single-decision parse. Current v0.2
+        # training artifacts require parse_candidate_output() top-k candidates;
+        # branch_actions.py excludes records that arrive here from mining/pairs.
         parsed = parse_decision_output(decoded)
         decision = parsed["decision"]
         confidence_source = "decision_confidence_output"
@@ -338,6 +344,166 @@ class HFLocalPolicy:
         return action_scores, action_probabilities
 
 
+class VLLMLocalPolicy:
+    def __init__(
+        self,
+        model_path: str,
+        max_new_tokens: int = 256,
+        candidate_temperature: float = 0.7,
+        candidate_top_p: float = 0.95,
+        gpu_memory_utilization: float = 0.85,
+        max_model_len: int | None = None,
+    ):
+        from transformers import AutoTokenizer
+        from vllm import LLM, SamplingParams
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        llm_kwargs: dict[str, Any] = {
+            "model": model_path,
+            "trust_remote_code": True,
+            "dtype": "auto",
+            "gpu_memory_utilization": gpu_memory_utilization,
+        }
+        if max_model_len is not None:
+            llm_kwargs["max_model_len"] = max_model_len
+        self.llm = LLM(**llm_kwargs)
+        self.SamplingParams = SamplingParams
+        self.max_new_tokens = max_new_tokens
+        self.candidate_temperature = candidate_temperature
+        self.candidate_top_p = candidate_top_p
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+    def _format_prompt_for_generation(self, prompt_text: str) -> str:
+        if getattr(self.tokenizer, "chat_template", None) is None:
+            return prompt_text
+        system_part, _, user_part = prompt_text.partition("\n\n")
+        if not user_part:
+            messages = [{"role": "user", "content": prompt_text}]
+        else:
+            messages = [
+                {"role": "system", "content": system_part},
+                {"role": "user", "content": user_part},
+            ]
+        return self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+
+    def generate_decision(self, sample, prompt_text: str) -> PolicyOutput:
+        action_scores, action_probabilities = self._score_action_options(prompt_text)
+        formatted_prompt = self._format_prompt_for_generation(prompt_text)
+        sampling_params = self.SamplingParams(
+            max_tokens=self.max_new_tokens,
+            temperature=self.candidate_temperature,
+            top_p=self.candidate_top_p,
+        )
+        outputs = self.llm.generate([formatted_prompt], sampling_params, use_tqdm=False)
+        decoded = outputs[0].outputs[0].text if outputs and outputs[0].outputs else ""
+
+        candidate_parsed = parse_candidate_output(decoded)
+        if candidate_parsed is not None:
+            candidates = candidate_parsed["candidates"]
+            reasoning = candidate_parsed["reasoning"]
+            top = candidates[0]
+            decision = {
+                "action": top["action"],
+                "confidence": top["confidence"],
+                "action_input": top["action_input"],
+                "brief_rationale": top["brief_rationale"],
+            }
+            confidence_source = "vllm_candidate_output_rank1"
+            if decision.get("confidence") is None:
+                decision["confidence"] = round(action_probabilities.get(decision["action"], 0.5), 4)
+                confidence_source = "vllm_action_token_probability"
+            return PolicyOutput(
+                raw_text=decoded,
+                reason=reasoning["attempt"],
+                decision=decision,
+                action_scores=action_scores,
+                action_probabilities=action_probabilities,
+                confidence_source=confidence_source,
+                reasoning_attempt=reasoning["attempt"],
+                uncertainty_summary=reasoning["uncertainty_summary"],
+                candidates=candidates,
+            )
+
+        # DEPRECATED(mainline): legacy single-decision parse. Current v0.2
+        # training artifacts require parse_candidate_output() top-k candidates;
+        # branch_actions.py excludes records that arrive here from mining/pairs.
+        parsed = parse_decision_output(decoded)
+        decision = parsed["decision"]
+        confidence_source = "vllm_decision_output"
+        if decision.get("confidence") is None:
+            decision["confidence"] = round(action_probabilities.get(decision["action"], 0.5), 4)
+            confidence_source = "vllm_action_token_probability"
+        return PolicyOutput(
+            raw_text=decoded,
+            reason=parsed["reason"],
+            decision=decision,
+            action_scores=action_scores,
+            action_probabilities=action_probabilities,
+            confidence_source=confidence_source,
+            reasoning_attempt=parsed["reason"],
+            uncertainty_summary="",
+            candidates=None,
+        )
+
+    def finalize_after_tool(self, sample, decision: dict[str, Any], observation: dict[str, Any]) -> dict[str, str]:
+        return {"final_answer": json.dumps(observation, ensure_ascii=False), "final_status": f"completed_after_{decision['action'].lower()}"}
+
+    def _score_action_options(self, prompt_text: str) -> tuple[dict[str, float], dict[str, float]]:
+        diagnostic_prompt = prompt_text + '\nDiagnostic action classifier.\nAction: '
+        token_ids: dict[str, int] = {}
+        for action in ACTION_SPACE:
+            encoded = self.tokenizer.encode(action, add_special_tokens=False)
+            if encoded:
+                token_ids[action] = encoded[0]
+        selected_actions = list(token_ids.keys())
+        if not selected_actions:
+            return {}, {}
+
+        prefix_token_ids = self.tokenizer.encode(diagnostic_prompt, add_special_tokens=False)
+        prompts = [
+            {"prompt_token_ids": prefix_token_ids + [token_ids[action]]}
+            for action in selected_actions
+        ]
+        sampling_params = self.SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            prompt_logprobs=1,
+        )
+        action_scores: dict[str, float] = {}
+        outputs = self.llm.generate(prompts, sampling_params, use_tqdm=False)
+        action_token_index = len(prefix_token_ids)
+        for action, output in zip(selected_actions, outputs):
+            prompt_logprobs = output.prompt_logprobs or []
+            logprob_map = (
+                prompt_logprobs[action_token_index]
+                if len(prompt_logprobs) > action_token_index
+                else None
+            )
+            entry = logprob_map.get(token_ids[action]) if isinstance(logprob_map, dict) else None
+            if entry is not None:
+                action_scores[action] = float(entry.logprob)
+
+        if len(action_scores) != len(selected_actions):
+            # Keep the downstream contract robust if prompt_logprobs omits an
+            # action token. The probability mass of such candidates should be
+            # negligible instead of crashing the whole rollout.
+            missing_floor = min(action_scores.values(), default=-100.0) - 20.0
+            for action in selected_actions:
+                action_scores.setdefault(action, missing_floor)
+
+        max_score = max(action_scores.values())
+        exp_scores = {action: math.exp(score - max_score) for action, score in action_scores.items()}
+        normalizer = sum(exp_scores.values())
+        action_probabilities = {
+            action: (value / normalizer if normalizer > 0 else 0.0)
+            for action, value in exp_scores.items()
+        }
+        return action_scores, action_probabilities
+
+
 def _model_assets_available(model_path: str) -> bool:
     if not model_path:
         return False
@@ -348,18 +514,37 @@ def _model_assets_available(model_path: str) -> bool:
     return os.path.isfile(os.path.join(root, "config.json"))
 
 
-def build_policy(backend: str, model_path: str, exploration_rate: float, max_new_tokens: int,
-                 candidate_temperature: float = 0.7, candidate_top_p: float = 0.95):
+def build_policy(
+    backend: str,
+    model_path: str,
+    exploration_rate: float,
+    max_new_tokens: int,
+    candidate_temperature: float = 0.7,
+    candidate_top_p: float = 0.95,
+    vllm_gpu_memory_utilization: float = 0.85,
+    vllm_max_model_len: int | None = None,
+):
     # Accept both old name (exploration_rate) and new name (heuristic_exploration_rate).
     if backend == "heuristic":
+        # DEPRECATED(mainline): heuristic is gold-leaking and smoke-only.
         return HeuristicPolicy(exploration_rate=exploration_rate)
     if backend == "hf":
         return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
                              candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p)
+    if backend == "vllm":
+        return VLLMLocalPolicy(
+            model_path=model_path,
+            max_new_tokens=max_new_tokens,
+            candidate_temperature=candidate_temperature,
+            candidate_top_p=candidate_top_p,
+            gpu_memory_utilization=vllm_gpu_memory_utilization,
+            max_model_len=vllm_max_model_len,
+        )
     if backend == "auto":
         if _model_assets_available(model_path):
             return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
                                  candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p)
+        # DEPRECATED(mainline): auto demotion to heuristic is smoke-only.
         logger.warning(
             "rollout.backend=auto: student model assets not found at %r — "
             "falling back to HeuristicPolicy (gold-leaking). This is smoke-only "

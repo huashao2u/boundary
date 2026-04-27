@@ -137,11 +137,13 @@ def _semantic_bonus(action: str, semantic_tags: dict[str, bool], cfg: dict[str, 
     bonus_cfg = cfg.get("scoring", {}).get("semantic_bonus", {})
     cap = float(bonus_cfg.get("cap_per_candidate", 0.15))
     bonuses = {
+        "SEARCH_REQUIRED_SEARCH": ("SEARCH_REQUIRED", "SEARCH"),
         "TIME_SENSITIVE_SEARCH": ("TIME_SENSITIVE", "SEARCH"),
         "NEW_OR_TAIL_KNOWLEDGE_SEARCH": ("NEW_OR_TAIL_KNOWLEDGE", "SEARCH"),
         "CALCULATION_REQUIRED_CALCULATE": ("CALCULATION_REQUIRED", "CALCULATE"),
-        "MISSING_INFO_CLARIFY": ("MISSING_INFO", "CLARIFY"),
+        "CLARIFY_REQUIRED_CLARIFY": ("CLARIFY_REQUIRED", "CLARIFY"),
         "FALSE_PREMISE_REFUSE": ("FALSE_PREMISE", "REFUSE"),
+        "JUSTIFIED_REFUSE_REFUSE": ("JUSTIFIED_REFUSE", "REFUSE"),
     }
     total = 0.0
     for key, (tag, required_action) in bonuses.items():

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# DEPRECATED(mainline): legacy repository inspection only. This script is not
+# part of the current boundary experiment path (01 adapters -> 02 rollout ->
+# 03 strict teacher -> 04 strict pair construction).
+
 import json
 import sys
 from pathlib import Path

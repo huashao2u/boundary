@@ -18,16 +18,45 @@ from mcagent_boundary.rollout.generate_rollouts import generate_rollouts
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run full train-side boundary rollouts and mining.")
     parser.add_argument("--limit-per-dataset", type=int, default=None)
+    parser.add_argument(
+        "--backend",
+        choices=["hf", "vllm", "heuristic", "auto"],
+        default=None,
+        help="Override rollout backend from config.",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Override rollout.max_new_tokens for this run.",
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        default=None,
+        help="Comma-separated dataset subset. Defaults to configured train datasets.",
+    )
     parser.add_argument("--output-dir", type=str, default=None, help="Override output directory for all artifacts.")
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
 
     config = load_boundary_config()
+    if args.backend is not None:
+        config["rollout"]["backend"] = args.backend
+    if args.max_new_tokens is not None:
+        config["rollout"]["max_new_tokens"] = args.max_new_tokens
+    dataset_names = (
+        [item.strip() for item in args.datasets.split(",") if item.strip()]
+        if args.datasets
+        else list(config["datasets"]["train"])
+    )
 
     rollouts = generate_rollouts(
         config,
-        dataset_names=list(config["datasets"]["train"]),
+        dataset_names=dataset_names,
         phase=str(config["rollout"]["search_mode_train"]),
         limit_per_dataset=args.limit_per_dataset if args.limit_per_dataset is not None else config["rollout"]["limit_per_dataset"],
+        show_progress=not args.no_progress,
     )
 
     def _out(name: str) -> Path:

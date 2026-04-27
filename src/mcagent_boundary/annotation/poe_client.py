@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import time
 import urllib.request
 from typing import Any
 
@@ -24,6 +26,8 @@ class PoeChatClient:
         self.temperature = float(teacher_cfg["temperature"])
         self.max_retries = int(teacher_cfg["max_retries"])
         self.timeout_seconds = int(teacher_cfg["timeout_seconds"])
+        self.retry_backoff_seconds = float(teacher_cfg.get("retry_backoff_seconds", 2.0))
+        self.retry_backoff_max_seconds = float(teacher_cfg.get("retry_backoff_max_seconds", 30.0))
 
     def is_ready(self) -> bool:
         return bool(self.api_key)
@@ -42,13 +46,19 @@ class PoeChatClient:
             "response_format": {"type": "json_object"},
         }
         last_error = None
-        for _ in range(self.max_retries):
+        for attempt in range(self.max_retries):
             try:
                 raw = self._post_json(endpoint, payload)
                 content = (((raw.get("choices") or [{}])[0].get("message") or {}).get("content")) or "{}"
                 return json.loads(content)
             except Exception as exc:
                 last_error = exc
+                if attempt < self.max_retries - 1:
+                    delay = min(
+                        self.retry_backoff_max_seconds,
+                        self.retry_backoff_seconds * (2 ** attempt),
+                    )
+                    time.sleep(delay + random.uniform(0.0, min(1.0, delay * 0.25)))
         raise RuntimeError(f"Poe completion failed after retries: {last_error}")
 
     def _chat_endpoint(self) -> str:

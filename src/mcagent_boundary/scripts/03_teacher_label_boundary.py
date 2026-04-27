@@ -22,6 +22,17 @@ def main() -> None:
         default=None,
         help="Override input directory for boundary/clear_external JSONL files.",
     )
+    parser.add_argument(
+        "--include-clear-answer",
+        action="store_true",
+        help="Also label clear-answer anchors so pair construction never has unlabeled anchors.",
+    )
+    parser.add_argument(
+        "--strict-teacher",
+        action="store_true",
+        help="Disable rule fallback; fail immediately if a Poe teacher call fails.",
+    )
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
 
     config = load_boundary_config()
@@ -40,11 +51,25 @@ def main() -> None:
 
     boundary_records = read_jsonl(_in("boundary_candidates_output"))
     clear_external = read_jsonl(_in("clear_external_output"))
-    records = boundary_records + clear_external
-    labels = label_boundary_records(records, config)
+    clear_answer = read_jsonl(_in("clear_answer_output")) if args.include_clear_answer else []
+    records = boundary_records + clear_answer + clear_external
+    labels = label_boundary_records(
+        records,
+        config,
+        show_progress=not args.no_progress,
+        allow_rule_fallback=not args.strict_teacher,
+    )
     output_path = _out("teacher_label_output")
     write_jsonl(output_path, labels)
-    print(json.dumps({"output": str(output_path), "num_labels": len(labels)}, ensure_ascii=False, indent=2))
+    source_counts: dict[str, int] = {}
+    for label in labels:
+        source = str(label.get("source", "unknown"))
+        source_counts[source] = source_counts.get(source, 0) + 1
+    print(json.dumps({
+        "output": str(output_path),
+        "num_labels": len(labels),
+        "source_counts": source_counts,
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

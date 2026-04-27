@@ -28,7 +28,50 @@
     },
     "rationale": {
       "type": "string"
+    },
+    "candidate_helpfulness": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "rank",
+          "action",
+          "score",
+          "reason"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "ANSWER",
+              "SEARCH",
+              "CALCULATE",
+              "CLARIFY",
+              "REFUSE"
+            ]
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "preferred_over": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rubric_degenerate": {
+      "type": "boolean"
     }
   }
 }
-

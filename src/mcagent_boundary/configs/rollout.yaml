@@ -27,6 +27,8 @@ rollout:
   min_candidate_count: 2            # discard if student produces < 2 unique action types
   candidate_temperature: 0.7        # HF-only; controls candidate diversity
   candidate_top_p: 0.95             # HF-only
+  vllm_gpu_memory_utilization: 0.85
+  vllm_max_model_len: 4096
   heuristic_exploration_rate: 0.2   # heuristic policy only; was exploration_rate
   exploration_rate: 0.2             # backward-compat alias — do not remove
   allow_debug_fallback_branch: true
@@ -82,11 +84,13 @@ scoring:
   # semantic_bonus: only semantic tag keys are allowed here.
   # Process features (STRUGGLE_LONG, LOW_LOGIT_MARGIN, etc.) MUST NOT appear here.
   semantic_bonus:
+    SEARCH_REQUIRED_SEARCH: 0.05
     TIME_SENSITIVE_SEARCH: 0.05
     NEW_OR_TAIL_KNOWLEDGE_SEARCH: 0.05
     CALCULATION_REQUIRED_CALCULATE: 0.05
-    MISSING_INFO_CLARIFY: 0.05
+    CLARIFY_REQUIRED_CLARIFY: 0.05
     FALSE_PREMISE_REFUSE: 0.05
+    JUSTIFIED_REFUSE_REFUSE: 0.05
     cap_per_candidate: 0.15
   # Legacy flat keys for backward compatibility with old utility.py loader.
   lambda_tool: 0.10

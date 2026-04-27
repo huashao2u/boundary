@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from pathlib import Path
 
 from mcagent_core.rollout.policy import _model_assets_available, build_policy
 
 from mcagent_boundary.adapters import build_adapter_registry
+from mcagent_boundary.progress import make_progress
 from mcagent_boundary.rollout.branch_actions import rollout_one_example
 
 
@@ -32,12 +34,24 @@ def _resolve_model_path(config: dict) -> Path:
     return _resolve_path(config, str(config["paths"]["model_root"]))
 
 
-def load_standardized_examples(config: dict, dataset_names: list[str], limit_per_dataset: int | None = None) -> list:
+def load_standardized_examples(
+    config: dict,
+    dataset_names: list[str],
+    limit_per_dataset: int | None = None,
+    show_progress: bool = True,
+) -> list:
     registry = build_adapter_registry()
     dataset_root = _resolve_path(config, str(config["paths"]["dataset_root"]))
     examples = []
     default_splits = config["datasets"]["default_splits"]
-    for dataset_name in dataset_names:
+    iterator = make_progress(
+        dataset_names,
+        total=len(dataset_names),
+        desc="load datasets",
+        unit="dataset",
+        disable=not show_progress,
+    )
+    for dataset_name in iterator:
         adapter = registry[dataset_name]
         examples.extend(
             adapter.load(
@@ -53,6 +67,10 @@ def _resolve_backend(requested: str, model_path: str) -> str:
     """Resolve the rollout backend, demoting ``hf`` to ``heuristic`` if model assets
     are missing (so smoke tests still run) but leaving ``heuristic`` / ``auto`` alone.
 
+    DEPRECATED(mainline): this missing-model demotion is a smoke-test escape
+    hatch. Main experiment artifacts must use an actual student backend (hf or
+    vllm) and must not rely on heuristic fallback.
+
     See CLAUDE.md §Change 1.
     """
     if requested == "hf" and not _model_assets_available(model_path):
@@ -66,8 +84,19 @@ def _resolve_backend(requested: str, model_path: str) -> str:
     return requested
 
 
-def generate_rollouts(config: dict, dataset_names: list[str], phase: str, limit_per_dataset: int | None = None) -> list[dict]:
-    examples = load_standardized_examples(config, dataset_names=dataset_names, limit_per_dataset=limit_per_dataset)
+def generate_rollouts(
+    config: dict,
+    dataset_names: list[str],
+    phase: str,
+    limit_per_dataset: int | None = None,
+    show_progress: bool = True,
+) -> list[dict]:
+    examples = load_standardized_examples(
+        config,
+        dataset_names=dataset_names,
+        limit_per_dataset=limit_per_dataset,
+        show_progress=show_progress,
+    )
     model_path = str(_resolve_model_path(config))
     backend = _resolve_backend(str(config["rollout"]["backend"]), model_path)
     rollout_cfg = config.get("rollout", {})
@@ -78,5 +107,44 @@ def generate_rollouts(config: dict, dataset_names: list[str], phase: str, limit_
         max_new_tokens=int(rollout_cfg.get("max_new_tokens", 256)),
         candidate_temperature=float(rollout_cfg.get("candidate_temperature", 0.7)),
         candidate_top_p=float(rollout_cfg.get("candidate_top_p", 0.95)),
+        vllm_gpu_memory_utilization=float(rollout_cfg.get("vllm_gpu_memory_utilization", 0.85)),
+        vllm_max_model_len=(
+            int(rollout_cfg["vllm_max_model_len"])
+            if rollout_cfg.get("vllm_max_model_len") is not None
+            else None
+        ),
     )
-    return [rollout_one_example(example, config=config, phase=phase, policy=policy) for example in examples]
+    rollouts: list[dict] = []
+    counters: Counter[str] = Counter()
+    for dataset_name in dataset_names:
+        dataset_examples = [example for example in examples if example.dataset == dataset_name]
+        progress = make_progress(
+            dataset_examples,
+            total=len(dataset_examples),
+            desc=f"rollout {dataset_name}",
+            unit="example",
+            disable=not show_progress,
+        )
+        for example in progress:
+            record = rollout_one_example(example, config=config, phase=phase, policy=policy)
+            rollouts.append(record)
+            counters["records"] += 1
+            counters["valid_candidates"] += int(record.get("valid_candidate_count") or 0)
+            counters["invalid_candidates"] += int(record.get("invalid_candidate_count") or 0)
+            counters["empty_action_input"] += int(record.get("empty_action_input_count") or 0)
+            if record.get("diagnostics"):
+                counters["diagnostic_records"] += 1
+            try:
+                progress.set_postfix(
+                    total=counters["records"],
+                    valid=counters["valid_candidates"],
+                    invalid=counters["invalid_candidates"],
+                    empty=counters["empty_action_input"],
+                )
+            except Exception:
+                pass
+        try:
+            progress.close()
+        except Exception:
+            pass
+    return rollouts

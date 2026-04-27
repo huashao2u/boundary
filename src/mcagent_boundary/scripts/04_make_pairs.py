@@ -22,6 +22,17 @@ def main() -> None:
         default=None,
         help="Override input directory for boundary/anchor/teacher JSONL files.",
     )
+    parser.add_argument(
+        "--require-teacher-labels",
+        action="store_true",
+        help="Drop records that do not have a teacher label.",
+    )
+    parser.add_argument(
+        "--require-poe-teacher",
+        action="store_true",
+        help="Drop records whose teacher label source is not poe_teacher.",
+    )
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
 
     config = load_boundary_config()
@@ -43,26 +54,32 @@ def main() -> None:
     clear_external = read_jsonl(_in("clear_external_output"))
     teacher_labels = read_jsonl(_in("teacher_label_output"))
     selected_records = boundary_records + clear_answer + clear_external
-    train_pairs, eval_pairs, diagnostics = build_step_dpo_pairs(selected_records, teacher_labels, config)
+    train_pairs, eval_pairs, diagnostics = build_step_dpo_pairs(
+        selected_records,
+        teacher_labels,
+        config,
+        show_progress=not args.no_progress,
+        require_teacher_label=args.require_teacher_labels or args.require_poe_teacher,
+        require_poe_teacher=args.require_poe_teacher,
+    )
     train_path = _out("train_pair_output")
     eval_path = _out("eval_pair_output")
     write_jsonl(train_path, train_pairs)
     write_jsonl(eval_path, eval_pairs)
     diagnostics_path = train_path.with_name("pair_diagnostics.jsonl")
     write_jsonl(diagnostics_path, diagnostics)
-    print(
-        json.dumps(
-            {
-                "train_pairs": len(train_pairs),
-                "eval_pairs": len(eval_pairs),
-                "diagnostics": len(diagnostics),
-                "train_output": str(train_path),
-                "eval_output": str(eval_path),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
+    diagnostic_reasons: dict[str, int] = {}
+    for item in diagnostics:
+        reason = str(item.get("reason", "unknown"))
+        diagnostic_reasons[reason] = diagnostic_reasons.get(reason, 0) + 1
+    print(json.dumps({
+        "train_pairs": len(train_pairs),
+        "eval_pairs": len(eval_pairs),
+        "diagnostics": len(diagnostics),
+        "diagnostic_reasons": diagnostic_reasons,
+        "train_output": str(train_path),
+        "eval_output": str(eval_path),
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
