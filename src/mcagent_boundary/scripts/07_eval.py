@@ -22,7 +22,7 @@ from mcagent_boundary.config import load_boundary_config, resolve_repo_path
 from mcagent_boundary.evaluation.eval_actions import evaluate_actions
 from mcagent_boundary.evaluation.eval_calibration import evaluate_calibration
 from mcagent_boundary.evaluation.eval_task_metrics import evaluate_task_metrics
-from mcagent_boundary.io import write_json, write_jsonl
+from mcagent_boundary.io import write_json, write_jsonl, write_jsonl_by_dataset
 from mcagent_boundary.rollout.generate_rollouts import generate_rollouts
 
 
@@ -40,6 +40,7 @@ def main() -> None:
     )
     eval_rollout_path = resolve_repo_path(config["paths"]["eval_rollout_output"], config)
     write_jsonl(eval_rollout_path, eval_rollouts)
+    eval_rollouts_by_dataset = write_jsonl_by_dataset(eval_rollout_path, eval_rollouts)
     action_metrics = evaluate_actions(eval_rollouts)
     task_metrics = evaluate_task_metrics(eval_rollouts)
     calibration_metrics = evaluate_calibration(
@@ -48,6 +49,7 @@ def main() -> None:
     )
     aggregate = {
         "rollout_output": str(eval_rollout_path),
+        "rollouts_by_dataset": eval_rollouts_by_dataset,
         "action_metrics": action_metrics,
         "task_metrics": task_metrics,
         "calibration_metrics": calibration_metrics,

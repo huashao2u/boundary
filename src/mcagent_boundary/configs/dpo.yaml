@@ -27,6 +27,14 @@ mining:
   max_boundary_candidates: 4000
   max_clear_answer_anchors: 250
   max_clear_external_anchors: 250
+  boundary_score_weights:
+    low_u_rel_margin: 0.25
+    action_diversity: 0.15
+    low_candidate_logprob_margin: 0.15
+    rank_disagreement: 0.10
+    high_score_entropy: 0.10
+    confidence_logprob_mismatch: 0.10
+    semantic_pressure: 0.15
 
 warmup:
   enable_if_non_answer_rate_below: 0.15
@@ -67,4 +75,3 @@ training:
 
 evaluation:
   confidence_default: 0.5
-

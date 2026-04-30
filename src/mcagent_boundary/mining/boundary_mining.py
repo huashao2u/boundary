@@ -7,7 +7,8 @@ from mcagent_boundary.rollout.candidate_schema import is_valid_candidate, requir
 
 
 def _stable_process(process_features: dict[str, bool]) -> bool:
-    return not any(bool(value) for value in process_features.values())
+    deprecated = {"LOW_LOGIT_MARGIN"}
+    return not any(bool(value) for key, value in process_features.items() if key not in deprecated)
 
 
 _EXCLUDED_ROLLOUT_ISSUES = {
@@ -106,7 +107,7 @@ def _has_real_action_competition(
     return False
 
 
-def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]]) -> tuple[float, list[str]]:
+def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]], config: dict[str, Any]) -> tuple[float, list[str]]:
     process_features = rollout.get("process_features") or {}
     semantic_tags = rollout.get("semantic_tags") or {}
     actions = _candidate_actions(candidates)
@@ -115,11 +116,15 @@ def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]]) -
     reasons: list[str] = []
     score = 0.0
 
+    configured_weights = config.get("mining", {}).get("boundary_score_weights", {})
     process_weights = {
-        "LOW_LOGIT_MARGIN": 0.08,
-        "HIGH_BRANCHING": 0.06,
-        "STRUGGLE_LONG": 0.04,
-        "HAS_SELF_REPAIR": 0.04,
+        "LOW_CANDIDATE_LOGPROB_MARGIN": float(configured_weights.get("low_candidate_logprob_margin", 0.15)),
+        "RANK_DISAGREEMENT": float(configured_weights.get("rank_disagreement", 0.10)),
+        "HIGH_SCORE_ENTROPY": float(configured_weights.get("high_score_entropy", 0.10)),
+        "CONFIDENCE_LOGPROB_MISMATCH": float(configured_weights.get("confidence_logprob_mismatch", 0.10)),
+        "HIGH_BRANCHING": 0.04,
+        "STRUGGLE_LONG": 0.03,
+        "HAS_SELF_REPAIR": 0.03,
     }
     for feature, weight in process_weights.items():
         if process_features.get(feature):
@@ -267,7 +272,7 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
             reason_distribution[reason] += 1
             continue
 
-        score, reasons = _boundary_score(rollout_for_pool, candidates)
+        score, reasons = _boundary_score(rollout_for_pool, candidates, config)
         natural_action = str(candidates[0].get("action") or rollout.get("natural_action") or actions[0]).upper()
         stable = _stable_process(rollout.get("process_features") or {})
         high_confidence = (_as_float(candidates[0].get("confidence")) or 0.0) >= 0.75

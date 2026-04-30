@@ -14,12 +14,14 @@ class MathAdapter(DatasetAdapter):
     allow_refuse = True
 
     def _convert(self, sample, split: str) -> StandardizedExample:
+        metadata = self._base_metadata(sample, split)
+        if sample.metadata.get("level") is not None:
+            metadata["math_level"] = sample.metadata.get("level")
         return StandardizedExample(
             example_id=sample.id.replace("competition_math", "math"),
             dataset=self.dataset_name,
             split=split,
             question=sample.question,
             gold_answer=sample.gold_answer,
-            metadata=self._base_metadata(sample, split),
+            metadata=metadata,
         )
-

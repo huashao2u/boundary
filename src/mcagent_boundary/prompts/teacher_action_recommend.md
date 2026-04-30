@@ -1,5 +1,8 @@
 Question: {question}
 
+Gold/reference for offline utility judging only:
+{gold_reference}
+
 Student reasoning attempt:
 {reason_attempt}
 
@@ -21,6 +24,6 @@ Semantic tag evidence (source/text/confidence diagnostics):
 Dataset / boundary metadata (for your context only, not for the student):
 {dataset_boundary}
 
-Follow the helpfulness rubric exactly. Score every candidate.
-Do NOT invent tool outputs. Do NOT make absolute external factual claims.
+Follow the utility rubric exactly. Score every candidate as emitted by the student.
+Do NOT invent tool outputs. Do NOT use gold/reference to create or repair action_input. Do NOT make absolute external factual claims.
 Return JSON only.

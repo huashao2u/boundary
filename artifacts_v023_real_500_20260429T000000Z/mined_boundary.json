@@ -1,0 +1,48 @@
+{
+  "num_rollouts": 500,
+  "num_valid_candidates": 707,
+  "invalid_candidate_rate": 0.005625879043600563,
+  "empty_action_input_count": 4,
+  "num_boundary_candidates": 200,
+  "num_clear_answer_anchors": 25,
+  "num_clear_external_anchors": 0,
+  "num_other": 275,
+  "pool_distribution": {
+    "other": 275,
+    "boundary_critical": 200,
+    "clear_answer_anchor": 25
+  },
+  "tag_distribution": {
+    "CALCULATION_REQUIRED": 174,
+    "CALCULATE_REQUIRED": 174,
+    "TOOL_REQUIRED": 363,
+    "MISCONCEPTION_RISK": 1,
+    "MISSING_INFO": 84,
+    "CLARIFY_REQUIRED": 84,
+    "TIME_SENSITIVE": 15,
+    "JUSTIFIED_REFUSE": 38,
+    "SEARCH_REQUIRED": 119,
+    "NEW_OR_TAIL_KNOWLEDGE": 103
+  },
+  "boundary_reason_distribution": {
+    "low_boundary_score": 49,
+    "RANK_DISAGREEMENT": 168,
+    "HIGH_SCORE_ENTROPY": 23,
+    "CONFIDENCE_LOGPROB_MISMATCH": 55,
+    "HIGH_BRANCHING": 174,
+    "two_way_action_competition": 62,
+    "low_confidence_margin": 186,
+    "answer_external_boundary": 195,
+    "semantic_supports_calculate": 162,
+    "three_way_action_competition": 138,
+    "excluded_invalid_rollout": 226,
+    "STRUGGLE_LONG": 11,
+    "moderate_confidence_margin": 12,
+    "LOW_CANDIDATE_LOGPROB_MARGIN": 4,
+    "semantic_supports_clarify": 12,
+    "semantic_supports_search": 11,
+    "semantic_supports_refuse": 10
+  },
+  "clear_answer_anchor_count": 25,
+  "clear_external_anchor_count": 0
+}

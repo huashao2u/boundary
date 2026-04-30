@@ -302,7 +302,7 @@ def _balanced_object_spans(raw_text: str) -> list[str]:
     return spans
 
 
-def _candidate_payloads_from_text(raw_text: str) -> dict[str, Any] | None:
+def _candidate_payloads_from_text(raw_text: str, *, top_k: int = 3) -> dict[str, Any] | None:
     """Recover top-k candidate JSON from common model wrapper formats."""
     candidates: list[dict[str, Any]] = []
     # Free-form candidate snippets are only trusted when the model did not echo
@@ -327,7 +327,7 @@ def _candidate_payloads_from_text(raw_text: str) -> dict[str, Any] | None:
             "uncertainty_summary": "",
             "need_external_help": False,
         },
-        "candidates": candidates[:3],
+        "candidates": candidates,
     }
 
 
@@ -339,7 +339,7 @@ def _student_response_region(raw_text: str) -> str:
     return raw_text[marker_index + len(marker) :]
 
 
-def _candidate_output_payload(raw_text: str) -> dict[str, Any] | None:
+def _candidate_output_payload(raw_text: str, *, top_k: int = 3) -> dict[str, Any] | None:
     response_text = _student_response_region(raw_text)
     parsed = _parse_jsonish(response_text)
     if isinstance(parsed, dict) and isinstance(parsed.get("candidates"), list):
@@ -358,26 +358,41 @@ def _candidate_output_payload(raw_text: str) -> dict[str, Any] | None:
         if isinstance(parsed, dict) and isinstance(parsed.get("candidates"), list):
             return parsed
 
-    return _candidate_payloads_from_text(response_text)
+    return _candidate_payloads_from_text(response_text, top_k=top_k)
 
 
-def parse_candidate_output(raw_text: str) -> dict[str, Any] | None:
+def _enforce_answer_in_topk(candidates: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+    if "ANSWER" not in [candidate["action"] for candidate in candidates]:
+        raise ValueError("invalid_missing_answer")
+
+    top = list(candidates[:top_k])
+    if "ANSWER" not in [candidate["action"] for candidate in top]:
+        answer_candidate = next(candidate for candidate in candidates if candidate["action"] == "ANSWER")
+        if len(top) < top_k:
+            top.append(answer_candidate)
+        else:
+            top[-1] = answer_candidate
+    return [{**candidate, "rank": rank} for rank, candidate in enumerate(top, start=1)]
+
+
+def parse_candidate_output(raw_text: str, top_k: int = 3) -> dict[str, Any] | None:
     """Parse a v0.2 top-k candidate response from the student model.
 
     Returns a dict with keys ``reasoning`` and ``candidates`` on success.
     Returns ``None`` and writes a diagnostics entry on parse failure.
 
     Rules enforced (§1 / §1a / §Schema):
-    - Unique action types in candidates; list len 2–3.
+    - Unique action types in candidates; list len 2–top_k.
     - ANSWER must be present.
     - Degenerate single-action-type → None + ``invalid_single_action``.
     - ANSWER missing           → None + ``invalid_missing_answer``.
     - JSON parse/schema error  → None + ``invalid_schema``.
     - action_input minimally repaired; gold never injected.
-    - Ranks normalized to 1, 2, 3 after dedup/sort.
+    - Ranks normalized to 1..top_k after dedup/sort.
     """
     global _DIAG_COUNTS
-    parsed = _candidate_output_payload(raw_text)
+    top_k = max(2, int(top_k))
+    parsed = _candidate_output_payload(raw_text, top_k=top_k)
 
     if parsed is None or not isinstance(parsed, dict):
         _DIAG_COUNTS["invalid_schema"] += 1
@@ -422,7 +437,6 @@ def parse_candidate_output(raw_text: str) -> dict[str, Any] | None:
         logger.debug("parse_candidate_output: ANSWER missing from candidates")
         return None
 
-    # Trim to top-3 unique actions, preserving original rank ordering from the JSON list.
     ordered = []
     for item in candidates_raw:
         if not isinstance(item, dict):
@@ -430,17 +444,13 @@ def parse_candidate_output(raw_text: str) -> dict[str, Any] | None:
         action = str(item.get("action", "")).strip().upper()
         if action in seen_actions and action not in [c["action"] for c in ordered]:
             ordered.append(seen_actions[action])
-        if len(ordered) == 3:
-            break
-    # Ensure ANSWER is always included even if beyond top-3 in original list.
-    if "ANSWER" not in [c["action"] for c in ordered]:
-        ordered.append(seen_actions["ANSWER"])
-        ordered = ordered[:3]
 
-    # Normalize ranks.
-    candidates = []
-    for rank, cand in enumerate(ordered, start=1):
-        candidates.append({**cand, "rank": rank})
+    try:
+        candidates = _enforce_answer_in_topk(ordered, top_k=top_k)
+    except ValueError:
+        _DIAG_COUNTS["invalid_missing_answer"] += 1
+        logger.debug("parse_candidate_output: ANSWER missing from final top-k candidates")
+        return None
 
     reasoning_raw = parsed.get("reasoning", {})
     if not isinstance(reasoning_raw, dict):

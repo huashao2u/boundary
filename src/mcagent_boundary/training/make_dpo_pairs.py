@@ -274,7 +274,7 @@ def _teacher_missing_scores(
 ) -> list[dict[str, Any]]:
     if teacher_label is None:
         return []
-    scores = teacher_label.get("candidate_helpfulness") or []
+    scores = teacher_label.get("candidate_utility") or teacher_label.get("candidate_helpfulness") or []
     keys: set[tuple[int | None, str]] = set()
     fallback_actions: set[str] = set()
     for entry in scores:

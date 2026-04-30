@@ -3,11 +3,18 @@ from __future__ import annotations
 import unittest
 
 from mcagent_boundary.annotation.teacher_label import _validate_teacher_payload
+from mcagent_boundary.adapters.base import StandardizedExample
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
+from mcagent_boundary.rollout.branch_actions import rollout_one_example
 from mcagent_boundary.rollout.candidate_schema import canonicalize_candidate
+from mcagent_boundary.rollout.state import build_state
+from mcagent_boundary.scoring.utility import utility_rel
 from mcagent_boundary.training.make_dpo_pairs import build_step_dpo_pairs
+from mcagent_boundary.training.run_step_dpo import to_message_dpo_row
 from mcagent_core.features.extract_process_features import extract_process_features
 from mcagent_core.features.semantic_tags import build_semantic_tag_details_from_state
+from mcagent_core.prompting.build_prompts import parse_candidate_output
+from mcagent_core.rollout.policy import PolicyOutput
 
 
 def _tags(question: str, **kwargs):
@@ -15,6 +22,114 @@ def _tags(question: str, **kwargs):
 
 
 class V02FixTests(unittest.TestCase):
+    def test_candidate_parser_preserves_answer_when_answer_is_beyond_topk(self):
+        raw = """
+        {
+          "reasoning": {"attempt": "Try several routes."},
+          "candidates": [
+            {"action": "SEARCH", "confidence": 0.6, "action_input": {"query": "q"}},
+            {"action": "CALCULATE", "confidence": 0.5, "action_input": {"expression": "2+2"}},
+            {"action": "CLARIFY", "confidence": 0.4, "action_input": {"question": "which case?"}},
+            {"action": "ANSWER", "confidence": 0.3, "action_input": {"answer": "4"}}
+          ]
+        }
+        """
+        parsed = parse_candidate_output(raw, top_k=3)
+        self.assertIsNotNone(parsed)
+        candidates = parsed["candidates"]
+        self.assertEqual(len(candidates), 3)
+        self.assertIn("ANSWER", [candidate["action"] for candidate in candidates])
+        self.assertEqual([candidate["rank"] for candidate in candidates], [1, 2, 3])
+
+    def test_rollout_filters_disallowed_actions_before_training_pools(self):
+        class FakePolicy:
+            def generate_decision(self, sample, prompt_text):
+                return PolicyOutput(
+                    raw_text="{}",
+                    reason="I should compare direct answer and calculation.",
+                    decision={},
+                    reasoning_attempt="I should compare direct answer and calculation.",
+                    uncertainty_summary="",
+                    candidates=[
+                        {"rank": 1, "action": "SEARCH", "confidence": 0.7, "action_input": {"query": "2+2"}},
+                        {"rank": 2, "action": "ANSWER", "confidence": 0.6, "action_input": {"answer": "4"}},
+                        {"rank": 3, "action": "CALCULATE", "confidence": 0.5, "action_input": {"expression": "2+2"}},
+                    ],
+                )
+
+        example = StandardizedExample(
+            example_id="gsm8k-train-allow-filter",
+            dataset="gsm8k",
+            split="train",
+            question="What is 2+2?",
+            gold_answer="4",
+            metadata={
+                "boundary_type": "reasoning",
+                "can_search": False,
+                "can_calculate": True,
+                "can_clarify": False,
+                "allow_refuse": False,
+            },
+        )
+        config = {
+            "annotation": {"execute_tools": False},
+            "features": {"long_reason_token_threshold": 80},
+            "rollout": {"top_k_actions": 3, "candidate_logprob_scoring": {}},
+        }
+        record = rollout_one_example(example, config, phase="train", policy=FakePolicy())
+        self.assertNotIn("SEARCH", [candidate["action"] for candidate in record["candidates"]])
+        self.assertEqual(record["valid_candidate_count"], 2)
+        self.assertTrue(any(diag.get("issue") == "candidate_action_not_allowed" for diag in record["diagnostics"]))
+
+    def test_state_hash_includes_active_process_features(self):
+        example = StandardizedExample(
+            example_id="e-process",
+            dataset="gsm8k",
+            split="train",
+            question="What is 2+2?",
+            gold_answer="4",
+            metadata={"boundary_type": "reasoning"},
+        )
+        state_a = build_state(
+            example,
+            reason_prefix="same",
+            history=None,
+            process_features={"LOW_CANDIDATE_LOGPROB_MARGIN": True},
+            semantic_tags={},
+            active_semantic_tags=[],
+        )
+        state_b = build_state(
+            example,
+            reason_prefix="same",
+            history=None,
+            process_features={"LOW_CANDIDATE_LOGPROB_MARGIN": False},
+            semantic_tags={},
+            active_semantic_tags=[],
+        )
+        self.assertNotEqual(state_a.state_key_hash(), state_b.state_key_hash())
+
+    def test_utility_rel_prefers_teacher_utility_over_auto_answer_score(self):
+        branch = {"action": "ANSWER", "rank": 1, "action_input": {"answer": "4"}}
+        teacher_label = {
+            "candidate_utility": [{"rank": 1, "action": "ANSWER", "score": 0.1, "reason": "bad"}]
+        }
+        example = type("Example", (), {"gold_answer": "4", "task_type": "math", "metadata": {}, "question": "2+2"})()
+        config = {"scoring": {"base_value": {"ANSWER": 1.0}, "action_cost": {}, "semantic_bonus": {}}}
+        self.assertEqual(utility_rel(branch, teacher_label, {}, example, config), 0.1)
+
+    def test_to_message_dpo_row_uses_message_fields_only(self):
+        pair = {
+            "prompt_messages": [{"role": "user", "content": "Q"}],
+            "chosen_messages": [{"role": "assistant", "content": "A"}],
+            "rejected_messages": [{"role": "assistant", "content": "B"}],
+            "prompt": "flat prompt",
+            "chosen": "flat chosen",
+            "rejected": "flat rejected",
+        }
+        row = to_message_dpo_row(pair)
+        self.assertEqual(row["prompt"], pair["prompt_messages"])
+        self.assertNotEqual(row["prompt"], pair["prompt"])
+
     def test_semantic_tags_are_action_specific_and_not_overbroad(self):
         self.assertTrue(_tags("Who is the current CEO of ExampleCo?", metadata={"can_search": True})["TIME_SENSITIVE"])
         self.assertFalse(_tags("Who was the CEO of ExampleCo as of 2010?")["TIME_SENSITIVE"])

@@ -48,9 +48,104 @@ class PolicyOutput:
     reasoning_attempt: str = ""
     uncertainty_summary: str = ""
     candidates: list[dict[str, Any]] | None = None
+    candidate_action_logprobs: list[dict[str, Any]] | None = None
 
 
 ACTION_SPACE = ("ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE")
+
+
+def _prompt_text_to_messages(prompt_text: str) -> list[dict[str, str]]:
+    system_part, _, user_part = prompt_text.partition("\n\n")
+    if not user_part:
+        return [{"role": "user", "content": prompt_text}]
+    return [
+        {"role": "system", "content": system_part},
+        {"role": "user", "content": user_part},
+    ]
+
+
+def _chat_prefix_token_ids(tokenizer, prompt_messages: list[dict[str, str]]) -> list[int]:
+    if getattr(tokenizer, "chat_template", None) is None:
+        text = "\n".join(message.get("content", "") for message in prompt_messages)
+        return tokenizer.encode(text + "\n", add_special_tokens=False)
+    return tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+
+
+def _candidate_action_json(candidate: dict[str, Any]) -> str:
+    payload = {
+        "action": str(candidate.get("action", "")).upper(),
+        "action_input": candidate.get("action_input") or {},
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _build_finalize_prompt(sample, decision: dict[str, Any], observation: dict[str, Any]) -> str:
+    return (
+        "You are a decision-aware assistant.\n\n"
+        "You previously selected a tool action and now have the tool observation.\n"
+        "Use the observation directly; do not invent additional facts. Return valid JSON only.\n\n"
+        f"Original question: {getattr(sample, 'question', '')}\n"
+        f"Action taken: {decision.get('action')}\n"
+        f"Action input: {json.dumps(decision.get('action_input', {}), ensure_ascii=False)}\n"
+        f"Tool observation: {json.dumps(observation, ensure_ascii=False)}\n\n"
+        "Return JSON: {\"final_decision\":{\"action\":\"ANSWER|REFUSE\","
+        "\"confidence\":0.0,\"action_input\":{},\"brief_rationale\":\"\"}}"
+    )
+
+
+def _jsonish_payload(raw_text: str) -> dict[str, Any] | None:
+    try:
+        from json_repair import repair_json
+
+        repaired = repair_json(raw_text, return_objects=True)
+        if isinstance(repaired, dict):
+            return repaired
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _parse_finalize_output(raw_text: str, *, default_action: str) -> dict[str, str]:
+    payload = _jsonish_payload(raw_text)
+    if payload is None:
+        return {
+            "final_answer": "",
+            "final_status": "finalize_parse_failed",
+            "raw_finalize_text": raw_text,
+        }
+    final_decision = payload.get("final_decision", payload.get("decision", payload))
+    if not isinstance(final_decision, dict):
+        return {
+            "final_answer": "",
+            "final_status": "finalize_parse_failed",
+            "raw_finalize_text": raw_text,
+        }
+    action = str(final_decision.get("action", default_action)).upper()
+    action_input = final_decision.get("action_input") or {}
+    if not isinstance(action_input, dict):
+        action_input = {}
+    if action == "ANSWER":
+        answer = action_input.get("answer") or action_input.get("final_answer") or action_input.get("response") or ""
+        return {"final_answer": str(answer), "final_status": "answered_after_tool", "raw_finalize_text": raw_text}
+    if action == "REFUSE":
+        reason = action_input.get("reason") or action_input.get("explanation") or final_decision.get("brief_rationale") or ""
+        return {"final_answer": str(reason), "final_status": "refused_after_tool", "raw_finalize_text": raw_text}
+    return {
+        "final_answer": json.dumps(action_input, ensure_ascii=False),
+        "final_status": f"needs_additional_{action.lower()}",
+        "raw_finalize_text": raw_text,
+    }
 
 
 class HeuristicPolicy:
@@ -143,7 +238,13 @@ class HeuristicPolicy:
             candidates=candidates,
         )
 
-    def finalize_after_tool(self, sample, decision: dict[str, Any], observation: dict[str, Any]) -> dict[str, str]:
+    def finalize_after_tool(
+        self,
+        sample,
+        decision: dict[str, Any],
+        observation: dict[str, Any],
+        prompt_text: str | None = None,
+    ) -> dict[str, str]:
         action = decision["action"]
         if action == "SEARCH":
             gold = sample.gold_answer
@@ -204,7 +305,9 @@ class HeuristicPolicy:
 
 class HFLocalPolicy:
     def __init__(self, model_path: str, max_new_tokens: int = 256,
-                 candidate_temperature: float = 0.7, candidate_top_p: float = 0.95):
+                 candidate_temperature: float = 0.7, candidate_top_p: float = 0.95,
+                 candidate_top_k: int | None = None,
+                 top_k_actions: int = 3):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -214,6 +317,8 @@ class HFLocalPolicy:
         self.max_new_tokens = max_new_tokens
         self.candidate_temperature = candidate_temperature
         self.candidate_top_p = candidate_top_p
+        self.candidate_top_k = candidate_top_k
+        self.top_k_actions = top_k_actions
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -264,6 +369,8 @@ class HFLocalPolicy:
         if self.candidate_temperature > 0.0:
             gen_kwargs["temperature"] = self.candidate_temperature
             gen_kwargs["top_p"] = self.candidate_top_p
+            if self.candidate_top_k is not None:
+                gen_kwargs["top_k"] = self.candidate_top_k
         output = self.model.generate(**inputs, **gen_kwargs)
         # Slice off the prompt tokens so ``decoded`` contains only the student's
         # new continuation — otherwise parse sees the whole prompt.
@@ -271,7 +378,7 @@ class HFLocalPolicy:
         decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
         # Try v0.2 candidate parser first, fall back to legacy single-decision parser.
-        candidate_parsed = parse_candidate_output(decoded)
+        candidate_parsed = parse_candidate_output(decoded, top_k=self.top_k_actions)
         if candidate_parsed is not None:
             candidates = candidate_parsed["candidates"]
             reasoning = candidate_parsed["reasoning"]
@@ -320,8 +427,23 @@ class HFLocalPolicy:
             candidates=None,
         )
 
-    def finalize_after_tool(self, sample, decision: dict[str, Any], observation: dict[str, Any]) -> dict[str, str]:
-        return {"final_answer": json.dumps(observation, ensure_ascii=False), "final_status": f"completed_after_{decision['action'].lower()}"}
+    def finalize_after_tool(
+        self,
+        sample,
+        decision: dict[str, Any],
+        observation: dict[str, Any],
+        prompt_text: str | None = None,
+    ) -> dict[str, str]:
+        formatted_prompt = self._format_prompt_for_generation(prompt_text or _build_finalize_prompt(sample, decision, observation))
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": min(self.max_new_tokens, 256),
+            "do_sample": False,
+        }
+        output = self.model.generate(**inputs, **gen_kwargs)
+        generated_tokens = output[0][inputs.input_ids.shape[1]:]
+        decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return _parse_finalize_output(decoded, default_action=str(decision.get("action", "")).upper())
 
     def _score_action_options(self, prompt_text: str) -> tuple[dict[str, float], dict[str, float]]:
         diagnostic_prompt = prompt_text + '\nDiagnostic action classifier.\nAction: '
@@ -351,8 +473,11 @@ class VLLMLocalPolicy:
         max_new_tokens: int = 256,
         candidate_temperature: float = 0.7,
         candidate_top_p: float = 0.95,
+        candidate_top_k: int | None = None,
         gpu_memory_utilization: float = 0.85,
         max_model_len: int | None = None,
+        top_k_actions: int = 3,
+        candidate_logprob_scoring: dict[str, Any] | None = None,
     ):
         from transformers import AutoTokenizer
         from vllm import LLM, SamplingParams
@@ -363,6 +488,7 @@ class VLLMLocalPolicy:
             "trust_remote_code": True,
             "dtype": "auto",
             "gpu_memory_utilization": gpu_memory_utilization,
+            "enable_prefix_caching": True,
         }
         if max_model_len is not None:
             llm_kwargs["max_model_len"] = max_model_len
@@ -371,6 +497,9 @@ class VLLMLocalPolicy:
         self.max_new_tokens = max_new_tokens
         self.candidate_temperature = candidate_temperature
         self.candidate_top_p = candidate_top_p
+        self.candidate_top_k = candidate_top_k
+        self.top_k_actions = top_k_actions
+        self.candidate_logprob_scoring = dict(candidate_logprob_scoring or {})
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -392,17 +521,37 @@ class VLLMLocalPolicy:
     def generate_decision(self, sample, prompt_text: str) -> PolicyOutput:
         action_scores, action_probabilities = self._score_action_options(prompt_text)
         formatted_prompt = self._format_prompt_for_generation(prompt_text)
-        sampling_params = self.SamplingParams(
-            max_tokens=self.max_new_tokens,
-            temperature=self.candidate_temperature,
-            top_p=self.candidate_top_p,
-        )
+        sampling_kwargs: dict[str, Any] = {
+            "max_tokens": self.max_new_tokens,
+            "temperature": self.candidate_temperature,
+            "top_p": self.candidate_top_p,
+        }
+        if self.candidate_top_k is not None:
+            sampling_kwargs["top_k"] = self.candidate_top_k
+        sampling_params = self.SamplingParams(**sampling_kwargs)
         outputs = self.llm.generate([formatted_prompt], sampling_params, use_tqdm=False)
         decoded = outputs[0].outputs[0].text if outputs and outputs[0].outputs else ""
 
-        candidate_parsed = parse_candidate_output(decoded)
+        candidate_parsed = parse_candidate_output(decoded, top_k=self.top_k_actions)
         if candidate_parsed is not None:
             candidates = candidate_parsed["candidates"]
+            candidate_action_logprobs: list[dict[str, Any]] | None = None
+            if bool(self.candidate_logprob_scoring.get("enabled", False)):
+                candidate_action_logprobs = self.score_candidate_action_logprobs(
+                    prompt_messages=_prompt_text_to_messages(prompt_text),
+                    candidates=candidates,
+                )
+                scores_by_key = {
+                    (score.get("rank"), str(score.get("action", "")).upper()): score
+                    for score in candidate_action_logprobs
+                }
+                candidates = [
+                    {
+                        **candidate,
+                        **scores_by_key.get((candidate.get("rank"), str(candidate.get("action", "")).upper()), {}),
+                    }
+                    for candidate in candidates
+                ]
             reasoning = candidate_parsed["reasoning"]
             top = candidates[0]
             decision = {
@@ -425,6 +574,7 @@ class VLLMLocalPolicy:
                 reasoning_attempt=reasoning["attempt"],
                 uncertainty_summary=reasoning["uncertainty_summary"],
                 candidates=candidates,
+                candidate_action_logprobs=candidate_action_logprobs,
             )
 
         # DEPRECATED(mainline): legacy single-decision parse. Current v0.2
@@ -448,8 +598,76 @@ class VLLMLocalPolicy:
             candidates=None,
         )
 
-    def finalize_after_tool(self, sample, decision: dict[str, Any], observation: dict[str, Any]) -> dict[str, str]:
-        return {"final_answer": json.dumps(observation, ensure_ascii=False), "final_status": f"completed_after_{decision['action'].lower()}"}
+    def finalize_after_tool(
+        self,
+        sample,
+        decision: dict[str, Any],
+        observation: dict[str, Any],
+        prompt_text: str | None = None,
+    ) -> dict[str, str]:
+        formatted_prompt = self._format_prompt_for_generation(prompt_text or _build_finalize_prompt(sample, decision, observation))
+        sampling_params = self.SamplingParams(
+            max_tokens=min(self.max_new_tokens, 256),
+            temperature=0.0,
+        )
+        outputs = self.llm.generate([formatted_prompt], sampling_params, use_tqdm=False)
+        decoded = outputs[0].outputs[0].text if outputs and outputs[0].outputs else ""
+        return _parse_finalize_output(decoded, default_action=str(decision.get("action", "")).upper())
+
+    def score_candidate_action_logprobs(
+        self,
+        prompt_messages: list[dict[str, str]],
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Teacher-force score each candidate's emitted action JSON.
+
+        The scored text is only the action JSON payload, not the
+        meta-reflection. This is a rollout diagnostic signal, never U_rel.
+        """
+        prefix_ids = _chat_prefix_token_ids(self.tokenizer, prompt_messages)
+        prompts = []
+        action_ids_by_candidate: list[list[int]] = []
+        for candidate in candidates:
+            action_json = _candidate_action_json(candidate)
+            action_ids = self.tokenizer.encode(action_json, add_special_tokens=False)
+            action_ids_by_candidate.append(action_ids)
+            prompts.append({"prompt_token_ids": prefix_ids + action_ids})
+
+        if not prompts:
+            return []
+
+        sampling_params = self.SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            prompt_logprobs=int(self.candidate_logprob_scoring.get("prompt_logprobs", 1)),
+        )
+        outputs = self.llm.generate(prompts, sampling_params, use_tqdm=False)
+        scores: list[dict[str, Any]] = []
+        prefix_len = len(prefix_ids)
+        for candidate, action_ids, output in zip(candidates, action_ids_by_candidate, outputs):
+            prompt_logprobs = output.prompt_logprobs or []
+            logprob_sum = 0.0
+            found = 0
+            missing = 0
+            for offset, token_id in enumerate(action_ids):
+                index = prefix_len + offset
+                logprob_map = prompt_logprobs[index] if len(prompt_logprobs) > index else None
+                entry = logprob_map.get(token_id) if isinstance(logprob_map, dict) else None
+                if entry is None:
+                    missing += 1
+                    continue
+                logprob_sum += float(entry.logprob)
+                found += 1
+            denom = found if found > 0 else len(action_ids)
+            scores.append({
+                "rank": candidate.get("rank"),
+                "action": str(candidate.get("action", "")).upper(),
+                "action_json_logprob_sum": round(logprob_sum, 6),
+                "action_json_logprob_mean": round(logprob_sum / denom, 6) if denom else None,
+                "action_json_num_tokens": len(action_ids),
+                "missing_logprob_positions": missing,
+            })
+        return scores
 
     def _score_action_options(self, prompt_text: str) -> tuple[dict[str, float], dict[str, float]]:
         diagnostic_prompt = prompt_text + '\nDiagnostic action classifier.\nAction: '
@@ -521,8 +739,11 @@ def build_policy(
     max_new_tokens: int,
     candidate_temperature: float = 0.7,
     candidate_top_p: float = 0.95,
+    candidate_top_k: int | None = None,
     vllm_gpu_memory_utilization: float = 0.85,
     vllm_max_model_len: int | None = None,
+    top_k_actions: int = 3,
+    candidate_logprob_scoring: dict[str, Any] | None = None,
 ):
     # Accept both old name (exploration_rate) and new name (heuristic_exploration_rate).
     if backend == "heuristic":
@@ -530,20 +751,27 @@ def build_policy(
         return HeuristicPolicy(exploration_rate=exploration_rate)
     if backend == "hf":
         return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
-                             candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p)
+                             candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p,
+                             candidate_top_k=candidate_top_k,
+                             top_k_actions=top_k_actions)
     if backend == "vllm":
         return VLLMLocalPolicy(
             model_path=model_path,
             max_new_tokens=max_new_tokens,
             candidate_temperature=candidate_temperature,
             candidate_top_p=candidate_top_p,
+            candidate_top_k=candidate_top_k,
             gpu_memory_utilization=vllm_gpu_memory_utilization,
             max_model_len=vllm_max_model_len,
+            top_k_actions=top_k_actions,
+            candidate_logprob_scoring=candidate_logprob_scoring,
         )
     if backend == "auto":
         if _model_assets_available(model_path):
             return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
-                                 candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p)
+                                 candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p,
+                                 candidate_top_k=candidate_top_k,
+                                 top_k_actions=top_k_actions)
         # DEPRECATED(mainline): auto demotion to heuristic is smoke-only.
         logger.warning(
             "rollout.backend=auto: student model assets not found at %r — "

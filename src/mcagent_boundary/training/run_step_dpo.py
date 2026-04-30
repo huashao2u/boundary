@@ -8,6 +8,17 @@ from mcagent_boundary.io import write_json
 from mcagent_boundary.training.common import load_model_and_tokenizer
 
 
+def to_message_dpo_row(pair: dict) -> dict:
+    try:
+        return {
+            "prompt": pair["prompt_messages"],
+            "chosen": pair["chosen_messages"],
+            "rejected": pair["rejected_messages"],
+        }
+    except KeyError as exc:
+        raise ValueError("Step-DPO pair is missing message DPO fields.") from exc
+
+
 def run_step_dpo(
     train_pairs: list[dict],
     eval_pairs: list[dict],
@@ -21,8 +32,10 @@ def run_step_dpo(
         raise ValueError("No Step-DPO train pairs were provided.")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    train_data = train_pairs[: min(len(train_pairs), 64)] if smoke else train_pairs
-    eval_data = eval_pairs[: min(len(eval_pairs), 16)] if smoke else eval_pairs
+    raw_train_data = train_pairs[: min(len(train_pairs), 64)] if smoke else train_pairs
+    raw_eval_data = eval_pairs[: min(len(eval_pairs), 16)] if smoke else eval_pairs
+    train_data = [to_message_dpo_row(pair) for pair in raw_train_data]
+    eval_data = [to_message_dpo_row(pair) for pair in raw_eval_data]
     model, tokenizer = load_model_and_tokenizer(config)
     training_cfg = config["training"]
     dpo_args = DPOConfig(
@@ -58,6 +71,7 @@ def run_step_dpo(
     metrics = {
         "num_train_pairs": len(train_pairs),
         "num_eval_pairs": len(eval_pairs),
+        "dpo_format": "message",
         "smoke": smoke,
         "train_metrics": {
             key: value
@@ -67,4 +81,3 @@ def run_step_dpo(
     }
     write_json(output_dir / "metrics.json", metrics)
     return metrics
-

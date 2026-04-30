@@ -158,7 +158,7 @@ def _semantic_bonus(action: str, semantic_tags: dict[str, bool], cfg: dict[str, 
 
 
 # ---------------------------------------------------------------------------
-# Training annotation: U_rel (mixed estimator)
+# Training annotation: U_rel (teacher-as-utility-judge)
 # Process features MUST NOT appear in this function.
 # ---------------------------------------------------------------------------
 
@@ -171,14 +171,12 @@ def utility_rel(
 ) -> float:
     """Relative utility estimate for training annotation (§5a).
 
-    U_rel = base_value(a) × score(a|s) − action_cost(a) + semantic_bonus(a, z^sem)
+    U_rel = base_value(a) × teacher_utility(a|s,gold) − action_cost(a)
+            + semantic_bonus(a, z^sem)
 
-    score(a|s) depends on action type:
-      ANSWER    -> auto_correctness (gold hard label) or teacher fallback
-      CALCULATE -> expression_validity × goal_alignment or teacher fallback
-      CLARIFY   -> slot_hit_rate or teacher fallback
-      SEARCH    -> teacher_helpfulness (main)
-      REFUSE    -> teacher_helpfulness (main)
+    v0.2.3 default: every action type is scored by the teacher label. Automatic
+    answer/calculate/clarify proxy scores are retained only as smoke fallback
+    when a teacher label is absent.
 
     Process features DO NOT appear in this function.
     """
@@ -190,22 +188,18 @@ def utility_rel(
     base_value = float(base_values.get(action, 0.5))
     action_cost = float(cost_map.get(action, 0.0))
 
-    # Determine score by action type.
-    if action == "ANSWER":
-        auto = _auto_answer_score(branch, example)
-        score = auto if auto is not None else teacher_helpfulness(branch, teacher_label)
+    if teacher_label is not None:
+        score = teacher_helpfulness(branch, teacher_label)
+    elif action == "ANSWER":
+        score = _auto_answer_score(branch, example)
     elif action == "CALCULATE":
-        auto = _auto_calculate_score(branch, example)
-        score = auto if auto is not None else teacher_helpfulness(branch, teacher_label)
+        score = _auto_calculate_score(branch, example)
     elif action == "CLARIFY":
-        auto = _auto_clarify_score(branch, example)
-        score = auto if auto is not None else teacher_helpfulness(branch, teacher_label)
-    elif action == "SEARCH":
-        score = teacher_helpfulness(branch, teacher_label)
-    elif action == "REFUSE":
-        score = teacher_helpfulness(branch, teacher_label)
+        score = _auto_clarify_score(branch, example)
     else:
-        score = teacher_helpfulness(branch, teacher_label)
+        score = None
+    if score is None:
+        score = 0.5
 
     bonus = _semantic_bonus(action, semantic_tags, cfg)
     u = base_value * score - action_cost + bonus

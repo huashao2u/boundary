@@ -152,8 +152,9 @@ def _validate_teacher_payload(
     if not rationale:
         rationale = f"The current state favors {recommended_action} over weaker alternatives."
 
-    # candidate_helpfulness validation
-    raw_helpfulness = payload.get("candidate_helpfulness") or []
+    # candidate_utility validation. candidate_helpfulness is accepted only as a
+    # backward-compatible alias for older teacher outputs.
+    raw_helpfulness = payload.get("candidate_utility") or payload.get("candidate_helpfulness") or []
     candidate_helpfulness_by_key: dict[tuple[int | None, str], dict[str, Any]] = {}
     unmatched_by_action: dict[str, list[dict[str, Any]]] = {}
     if isinstance(raw_helpfulness, list) and raw_helpfulness:
@@ -173,7 +174,14 @@ def _validate_teacher_payload(
             except (TypeError, ValueError):
                 score = 0.5
             reason = str(entry.get("reason", "")).strip()[:80]
-            normalized = {"rank": rank, "action": action, "score": round(score, 1), "reason": reason}
+            failure_mode = str(entry.get("failure_mode", "")).strip()[:80]
+            normalized = {
+                "rank": rank,
+                "action": action,
+                "score": round(score, 1),
+                "reason": reason,
+                "failure_mode": failure_mode,
+            }
             if rank is None:
                 unmatched_by_action.setdefault(action, []).append(normalized)
             else:
@@ -223,6 +231,7 @@ def _validate_teacher_payload(
         "meta_reflection": meta_reflection,
         "recommended_action": recommended_action,
         "rationale": rationale,
+        "candidate_utility": candidate_helpfulness,
         "candidate_helpfulness": candidate_helpfulness,
         "preferred_over": preferred_over,
         "rubric_degenerate": rubric_degenerate,
@@ -254,6 +263,7 @@ def _fallback_label(record: dict[str, Any]) -> dict[str, Any]:
         "meta_reflection": f"I should choose {best_action} because it best matches the current uncertainty.",
         "recommended_action": best_action,
         "rationale": f"The highest local utility branch for this state is {best_action}.",
+        "candidate_utility": candidate_helpfulness,
         "candidate_helpfulness": candidate_helpfulness,
         "preferred_over": preferred_over,
         "rubric_degenerate": False,
@@ -297,6 +307,10 @@ def label_boundary_records(
                 "brief_rationale": str(c.get("brief_rationale", "")),
                 "confidence": c.get("confidence"),
                 "action_input": c.get("canonical_action_input") or c.get("action_input") or {},
+                "action_json_logprob_mean": c.get("action_json_logprob_mean"),
+                "action_json_logprob_sum": c.get("action_json_logprob_sum"),
+                "action_json_num_tokens": c.get("action_json_num_tokens"),
+                "missing_logprob_positions": c.get("missing_logprob_positions"),
                 "valid_candidate": bool(c.get("valid_candidate")),
                 "schema_diagnostics": c.get("schema_diagnostics", []),
             }
@@ -313,6 +327,17 @@ def label_boundary_records(
 
         user_prompt = user_prompt_template.format(
             question=record["question"],
+            gold_reference=json.dumps(
+                {
+                    "gold_answer": record.get("gold_answer"),
+                    "metadata_refusal_label": {
+                        "should_refuse": (record.get("metadata") or {}).get("should_refuse"),
+                        "or_bench_label": (record.get("metadata") or {}).get("or_bench_label"),
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             reason_attempt=record.get("reasoning_attempt", record.get("reason_prefix", "")),
             uncertainty_summary=record.get("uncertainty_summary", ""),
             student_candidates=json.dumps(student_candidates_for_prompt, ensure_ascii=False, indent=2),

@@ -6,6 +6,7 @@ from mcagent_boundary.adapters.gsm8k import GSM8KAdapter
 from mcagent_boundary.adapters.in3 import IN3Adapter
 from mcagent_boundary.adapters.math import MathAdapter
 from mcagent_boundary.adapters.mintqa import MintQAAdapter
+from mcagent_boundary.adapters.or_bench import ORBenchAdapter
 from mcagent_boundary.adapters.realtimeqa import RealTimeQAEvalAdapter
 from mcagent_boundary.adapters.truthfulqa import TruthfulQAEvalAdapter
 
@@ -19,6 +20,7 @@ def build_adapter_registry() -> dict[str, DatasetAdapter]:
         MathAdapter(),
         IN3Adapter(),
         MintQAAdapter(),
+        ORBenchAdapter(),
         FreshQAEvalAdapter(),
         TruthfulQAEvalAdapter(),
         RealTimeQAEvalAdapter(),

@@ -12,6 +12,7 @@ BOUNDARY_TO_TASK = {
     "reasoning": "math",
     "factual": "factual_boundary",
     "intention": "intention_boundary",
+    "refusal": "refusal_boundary",
 }
 
 
@@ -30,7 +31,7 @@ class StandardizedExample:
 
     @property
     def task_type(self) -> str:
-        return BOUNDARY_TO_TASK.get(self.boundary_type, "factual_boundary")
+        return str(self.metadata.get("task_type") or BOUNDARY_TO_TASK.get(self.boundary_type, "factual_boundary"))
 
     @property
     def can_search(self) -> bool:

@@ -48,11 +48,13 @@ class BoundaryState:
     def state_key_hash(self) -> str:
         """Return a stable SHA1 over the identifying components of the state.
 
-        This preserves the exact hash the rollout pipeline has always used for
-        ``state_id`` so boundary mining and teacher-label joins remain stable
-        across the refactor.
+        Process features are part of ``z_t`` and therefore part of state
+        identity in v0.2.3.
         """
         active_tags = list(self.z_t.get("active_semantic_tags", []))
+        active_process_features = sorted(
+            key for key, value in (self.z_t.get("process_features", {}) or {}).items() if value
+        )
         example_id = self.z_t.get("metadata", {}).get("example_id", "")
         state_key = json.dumps(
             {
@@ -60,6 +62,7 @@ class BoundaryState:
                 "question": self.x,
                 "reason_prefix": self.r_t,
                 "active_semantic_tags": active_tags,
+                "active_process_features": active_process_features,
             },
             ensure_ascii=False,
             sort_keys=True,

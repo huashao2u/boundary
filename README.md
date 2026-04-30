@@ -40,7 +40,7 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py
 # 2. 学生模型 rollout + boundary / anchor 挖掘
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
   --backend vllm \
-  --datasets gsm8k,math,in3,mintqa
+  --datasets gsm8k,math,in3,mintqa,or_bench
 
 # 3. Poe teacher 严格标注；失败即停止，不走规则 fallback
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py \
@@ -52,18 +52,18 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
   --require-poe-teacher
 ```
 
-200 样本 smoke/验证运行示例：
+250 样本 smoke/验证运行示例：
 
 ```bash
 cd /media/boundary
-RUN_DIR=artifacts_v02_vllm_200_strict_$(date -u +%Y%m%dT%H%M%SZ)
+RUN_DIR=artifacts_v023_vllm_250_strict_$(date -u +%Y%m%dT%H%M%SZ)
 
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py \
   --limit-per-dataset 50
 
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
   --backend vllm \
-  --datasets gsm8k,math,in3,mintqa \
+  --datasets gsm8k,math,in3,mintqa,or_bench \
   --limit-per-dataset 50 \
   --output-dir "$RUN_DIR"
 
@@ -79,7 +79,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
   --require-poe-teacher
 ```
 
-`--output-dir` 只覆盖 `02/03/04` 的中间产物读写目录。`06_train_dpo.py` 读取配置中的
+`--output-dir` 只覆盖 `02/03/04` 的中间产物读写目录。`02/03/04/07` 会保留聚合 JSONL，
+并额外写入 `by_dataset/<dataset>/同名文件.jsonl`，用于按数据集来源追踪 rollout、mining、
+teacher label、DPO pair 和 eval rollout 产物。`06_train_dpo.py` 读取配置中的
 `paths.train_pair_output` / `paths.eval_pair_output`，如果要训练某个自定义 `RUN_DIR` 里的
 pair，需要先把对应 JSONL 放回配置路径，或临时修改 `paths.yaml`。
 
@@ -105,7 +107,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py \
 ### `02_rollout_all.py`
 
 功能：运行学生 policy，解析 top-k action candidates，构建训练侧 rollout 记录，并挖掘
-`boundary_candidates`、`clear_answer_anchors`、`clear_external_anchors`。
+`boundary_candidates`、`clear_answer_anchors`、`clear_external_anchors`。v0.2.3 默认使用 vLLM，
+并对每个 student candidate 的 action JSON 计算 teacher-forced logprob mean，作为 process
+uncertainty 诊断信号。
 
 参数：
 
@@ -116,15 +120,15 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py \
 - `--output-dir DIR`：把 rollout/mining/anchor JSONL 写入指定目录。
 - `--no-progress`：关闭进度条。
 
-主实验推荐 `hf` 或 `vllm`。`heuristic` 会读 gold，是 smoke/debug-only；`auto` 在模型缺失时会退到
-`heuristic`，因此也不能作为主实验产物来源。
+主实验推荐 `vllm` 或 `hf`。`heuristic` 会读 gold，是 smoke/debug-only；主配置禁用 heuristic
+fallback，模型资产缺失会直接报错。
 
 示例：
 
 ```bash
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
   --backend vllm \
-  --datasets gsm8k,math,in3,mintqa \
+  --datasets gsm8k,math,in3,mintqa,or_bench \
   --limit-per-dataset 50 \
   --output-dir artifacts_v02_vllm_200_strict
 ```
@@ -162,6 +166,8 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 - chosen：`U_rel` 最高，且 teacher rubric 不退化。
 - rejected：不同 action type，且 utility gap 不低于 `pair_construction.min_utility_gap`。
 - schema 无效、action_input 为空、debug fallback、非 Poe teacher 标签都会被过滤。
+- 聚合 pair 之外，会额外写 `by_dataset/<dataset>/train_step_dpo_pairs.jsonl` 和
+  `by_dataset/<dataset>/eval_step_dpo_pairs.jsonl`。
 
 参数：
 
@@ -195,6 +201,8 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/05_optional_warmup.py --run-
 ### `06_train_dpo.py`
 
 读取配置路径中的 `train_step_dpo_pairs.jsonl` / `eval_step_dpo_pairs.jsonl`，运行 TRL DPOTrainer。
+训练入口只把 `prompt_messages/chosen_messages/rejected_messages` 转成 conversational
+`prompt/chosen/rejected` 传给 trainer；flat text 字段仅用于 debug/export。
 
 参数：
 
@@ -247,12 +255,12 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/07_eval.py --limit-per-datas
 
 ## Rollout 后端和显存
 
-`rollout.yaml` 默认 `backend: hf`。可用后端：
+`rollout.yaml` 默认 `backend: vllm`。可用后端：
 
+- `vllm`：vLLM 本地推理，当前默认主实验后端，并计算 candidate action JSON logprob mean。
 - `hf`：HuggingFace 本地推理，主实验可用。
-- `vllm`：vLLM 本地推理，主实验可用，并计算 action token probabilities。
 - `heuristic`：gold-leaking oracle policy，仅 smoke/debug。
-- `auto`：模型存在时用 `hf`，缺失时退到 `heuristic`，因此仅 smoke/debug。
+- `auto`：模型存在时用 `hf`；主配置禁用 heuristic fallback，因此模型缺失会直接报错。
 
 vLLM 配置：
 

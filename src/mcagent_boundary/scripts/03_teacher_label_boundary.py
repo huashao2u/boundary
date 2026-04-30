@@ -10,7 +10,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from mcagent_boundary.annotation.teacher_label import label_boundary_records
 from mcagent_boundary.config import load_boundary_config, resolve_repo_path
-from mcagent_boundary.io import read_jsonl, write_jsonl
+from mcagent_boundary.io import read_jsonl, write_jsonl, write_jsonl_by_dataset
 
 
 def main() -> None:
@@ -61,12 +61,14 @@ def main() -> None:
     )
     output_path = _out("teacher_label_output")
     write_jsonl(output_path, labels)
+    labels_by_dataset = write_jsonl_by_dataset(output_path, labels)
     source_counts: dict[str, int] = {}
     for label in labels:
         source = str(label.get("source", "unknown"))
         source_counts[source] = source_counts.get(source, 0) + 1
     print(json.dumps({
         "output": str(output_path),
+        "by_dataset": labels_by_dataset,
         "num_labels": len(labels),
         "source_counts": source_counts,
     }, ensure_ascii=False, indent=2))

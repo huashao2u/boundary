@@ -4,6 +4,7 @@ datasets:
     - math
     - in3
     - mintqa
+    - or_bench
   eval: []
     # freshqa disabled for this run — per user; re-enable once tool finalize pass is validated.
     # - truthfulqa    # see CLAUDE.md §Change 6: enable once dataset/truthfulqa exists
@@ -13,22 +14,40 @@ datasets:
     math: train
     in3: train
     mintqa: train
+    or_bench: train
     # truthfulqa: validation
     # realtimeqa: test
+  math_train_levels: [1, 2, 3]
+  math_eval_levels: [4, 5]
 
 rollout:
-  # hf = student model (default, required for the main experiment);
+  # vllm = student model (default, required for the main experiment);
+  # hf = student model via HuggingFace;
   # heuristic = oracle smoke/debug only (reads gold labels — NOT for production runs);
-  # auto = prefer hf, fall back to heuristic with a loud warning if model assets are missing.
-  backend: hf
+  # auto = prefer hf, fall back to heuristic only when allow_heuristic_fallback=true.
+  backend: vllm
   limit_per_dataset: null
   max_new_tokens: 1024
   top_k_actions: 3                  # k=3; avoids degenerate full-action ranking
   min_candidate_count: 2            # discard if student produces < 2 unique action types
-  candidate_temperature: 0.7        # HF-only; controls candidate diversity
-  candidate_top_p: 0.95             # HF-only
+  candidate_temperature: 0.6
+  candidate_top_p: 0.9
+  candidate_top_k: 50
   vllm_gpu_memory_utilization: 0.85
   vllm_max_model_len: 4096
+  allow_heuristic_fallback: false
+  candidate_logprob_scoring:
+    enabled: true
+    prompt_logprobs: 1
+    score_action_json_only: true
+    normalize: mean
+    use_prefix_caching: true
+    fallback_full_vocab_on_missing: false
+    entropy_temperature: 1.0
+    low_margin_delta: 0.10
+    high_entropy_threshold: 0.85
+    confidence_high_threshold: 0.75
+    logprob_low_percentile: 0.30
   heuristic_exploration_rate: 0.2   # heuristic policy only; was exploration_rate
   exploration_rate: 0.2             # backward-compat alias — do not remove
   allow_debug_fallback_branch: true
@@ -41,12 +60,12 @@ rollout:
 annotation:
   execute_tools: false              # training annotation: no real tool calls
   tool_finalize_pass: false         # no finalize pass during annotation
-  score_sources:                    # §5a mixed estimator signal mapping
-    ANSWER: auto_correctness        # gold hard label when available; else teacher
-    CALCULATE: expression_and_goal  # expression_validity × goal_alignment; fallback teacher
-    CLARIFY: slot_hit_rate          # gold slot overlap when available; else teacher
-    SEARCH: teacher_helpfulness
-    REFUSE: teacher_helpfulness
+  score_sources:
+    ANSWER: teacher_utility
+    CALCULATE: teacher_utility
+    CLARIFY: teacher_utility
+    SEARCH: teacher_utility
+    REFUSE: teacher_utility
 
 eval:
   execute_tools: true               # eval: execute tools for real
@@ -82,7 +101,7 @@ scoring:
     ANSWER: 0.0
     REFUSE: 0.0
   # semantic_bonus: only semantic tag keys are allowed here.
-  # Process features (STRUGGLE_LONG, LOW_LOGIT_MARGIN, etc.) MUST NOT appear here.
+  # Process features (STRUGGLE_LONG, LOW_CANDIDATE_LOGPROB_MARGIN, etc.) MUST NOT appear here.
   semantic_bonus:
     SEARCH_REQUIRED_SEARCH: 0.05
     TIME_SENSITIVE_SEARCH: 0.05

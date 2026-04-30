@@ -63,7 +63,7 @@ def load_standardized_examples(
     return examples
 
 
-def _resolve_backend(requested: str, model_path: str) -> str:
+def _resolve_backend(requested: str, model_path: str, *, allow_heuristic_fallback: bool) -> str:
     """Resolve the rollout backend, demoting ``hf`` to ``heuristic`` if model assets
     are missing (so smoke tests still run) but leaving ``heuristic`` / ``auto`` alone.
 
@@ -73,14 +73,20 @@ def _resolve_backend(requested: str, model_path: str) -> str:
 
     See CLAUDE.md §Change 1.
     """
-    if requested == "hf" and not _model_assets_available(model_path):
+    assets_available = _model_assets_available(model_path)
+    if requested in {"hf", "vllm"} and not assets_available and not allow_heuristic_fallback:
+        raise RuntimeError("Student model assets missing; heuristic fallback disabled.")
+    if requested in {"hf", "vllm"} and not assets_available:
         logger.warning(
-            "rollout.backend=hf requested but student model assets not found at %r — "
+            "rollout.backend=%s requested but student model assets not found at %r — "
             "falling back to HeuristicPolicy for this run. This is smoke-only behavior; "
             "mainline experiment rollouts require a real student model.",
+            requested,
             model_path,
         )
         return "heuristic"
+    if requested == "auto" and not assets_available and not allow_heuristic_fallback:
+        raise RuntimeError("Student model assets missing for rollout.backend=auto; heuristic fallback disabled.")
     return requested
 
 
@@ -98,7 +104,11 @@ def generate_rollouts(
         show_progress=show_progress,
     )
     model_path = str(_resolve_model_path(config))
-    backend = _resolve_backend(str(config["rollout"]["backend"]), model_path)
+    backend = _resolve_backend(
+        str(config["rollout"]["backend"]),
+        model_path,
+        allow_heuristic_fallback=bool(config.get("rollout", {}).get("allow_heuristic_fallback", False)),
+    )
     rollout_cfg = config.get("rollout", {})
     policy = build_policy(
         backend=backend,
@@ -107,12 +117,19 @@ def generate_rollouts(
         max_new_tokens=int(rollout_cfg.get("max_new_tokens", 256)),
         candidate_temperature=float(rollout_cfg.get("candidate_temperature", 0.7)),
         candidate_top_p=float(rollout_cfg.get("candidate_top_p", 0.95)),
+        candidate_top_k=(
+            int(rollout_cfg["candidate_top_k"])
+            if rollout_cfg.get("candidate_top_k") is not None
+            else None
+        ),
         vllm_gpu_memory_utilization=float(rollout_cfg.get("vllm_gpu_memory_utilization", 0.85)),
         vllm_max_model_len=(
             int(rollout_cfg["vllm_max_model_len"])
             if rollout_cfg.get("vllm_max_model_len") is not None
             else None
         ),
+        top_k_actions=int(rollout_cfg.get("top_k_actions", 3)),
+        candidate_logprob_scoring=dict(rollout_cfg.get("candidate_logprob_scoring") or {}),
     )
     rollouts: list[dict] = []
     counters: Counter[str] = Counter()

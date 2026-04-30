@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from mcagent_boundary.config import load_boundary_config, resolve_repo_path
-from mcagent_boundary.io import read_jsonl, write_jsonl
+from mcagent_boundary.io import read_jsonl, write_jsonl, write_jsonl_by_dataset
 from mcagent_boundary.training.make_dpo_pairs import build_step_dpo_pairs
 
 
@@ -66,8 +66,11 @@ def main() -> None:
     eval_path = _out("eval_pair_output")
     write_jsonl(train_path, train_pairs)
     write_jsonl(eval_path, eval_pairs)
+    train_by_dataset = write_jsonl_by_dataset(train_path, train_pairs)
+    eval_by_dataset = write_jsonl_by_dataset(eval_path, eval_pairs)
     diagnostics_path = train_path.with_name("pair_diagnostics.jsonl")
     write_jsonl(diagnostics_path, diagnostics)
+    diagnostics_by_dataset = write_jsonl_by_dataset(diagnostics_path, diagnostics)
     diagnostic_reasons: dict[str, int] = {}
     for item in diagnostics:
         reason = str(item.get("reason", "unknown"))
@@ -79,6 +82,9 @@ def main() -> None:
         "diagnostic_reasons": diagnostic_reasons,
         "train_output": str(train_path),
         "eval_output": str(eval_path),
+        "train_by_dataset": train_by_dataset,
+        "eval_by_dataset": eval_by_dataset,
+        "diagnostics_by_dataset": diagnostics_by_dataset,
     }, ensure_ascii=False, indent=2))
 
 

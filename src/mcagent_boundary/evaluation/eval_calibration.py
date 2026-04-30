@@ -10,7 +10,7 @@ def evaluate_calibration(rollouts: list[dict[str, Any]], default_confidence: flo
     scores: list[float] = []
     for record in rollouts:
         natural_action = record.get("natural_action")
-        best_action = record.get("best_action")
+        best_action = record.get("best_action_real")
         if natural_action is None or best_action is None:
             continue
         confidence = record.get("natural_action_confidence")
@@ -28,4 +28,3 @@ def evaluate_calibration(rollouts: list[dict[str, Any]], default_confidence: flo
         "num_samples": len(labels),
         **summary,
     }
-

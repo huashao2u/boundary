@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from mcagent_boundary.config import load_boundary_config, resolve_repo_path
-from mcagent_boundary.io import write_json, write_jsonl
+from mcagent_boundary.io import write_json, write_jsonl, write_jsonl_by_dataset
 from mcagent_boundary.mining.anchor_sampling import sample_anchor_pools
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
 from mcagent_boundary.rollout.generate_rollouts import generate_rollouts
@@ -67,17 +67,28 @@ def main() -> None:
 
     rollout_output = _out("rollout_output")
     write_jsonl(rollout_output, rollouts)
+    rollout_by_dataset = write_jsonl_by_dataset(rollout_output, rollouts)
 
     mined = mine_boundary_states(rollouts, config)
     sampled = sample_anchor_pools(mined, config)
     write_json(_out("mining_output"), mined["summary"])
-    write_jsonl(_out("boundary_candidates_output"), sampled["boundary_candidates"])
-    write_jsonl(_out("clear_answer_output"), sampled["clear_answer_anchors"])
-    write_jsonl(_out("clear_external_output"), sampled["clear_external_anchors"])
+    boundary_path = _out("boundary_candidates_output")
+    clear_answer_path = _out("clear_answer_output")
+    clear_external_path = _out("clear_external_output")
+    write_jsonl(boundary_path, sampled["boundary_candidates"])
+    write_jsonl(clear_answer_path, sampled["clear_answer_anchors"])
+    write_jsonl(clear_external_path, sampled["clear_external_anchors"])
+    boundary_by_dataset = write_jsonl_by_dataset(boundary_path, sampled["boundary_candidates"])
+    clear_answer_by_dataset = write_jsonl_by_dataset(clear_answer_path, sampled["clear_answer_anchors"])
+    clear_external_by_dataset = write_jsonl_by_dataset(clear_external_path, sampled["clear_external_anchors"])
     print(
         json.dumps(
             {
                 "rollout_output": str(rollout_output),
+                "rollout_by_dataset": rollout_by_dataset,
+                "boundary_by_dataset": boundary_by_dataset,
+                "clear_answer_by_dataset": clear_answer_by_dataset,
+                "clear_external_by_dataset": clear_external_by_dataset,
                 "summary": mined["summary"],
             },
             ensure_ascii=False,

@@ -137,6 +137,18 @@ def _compute_per_example(
     example = _ExampleProxy(record)
     semantic_tags: dict[str, bool] = dict(record.get("semantic_tags") or {})
     branches = list(record.get("branches") or [])
+    if not record.get("execute_tools"):
+        raise ValueError(
+            f"Record {record.get('example_id')} is not an eval-style executed rollout; "
+            "calibration requires real tool execution and finalize outputs."
+        )
+    for branch in branches:
+        action = str(branch.get("action", "")).upper()
+        if action != "ANSWER" and branch.get("observation") is None:
+            raise ValueError(
+                f"Record {record.get('example_id')} branch {action} has no observation; "
+                "refusing to compute U_real on annotation rollouts."
+            )
     branch_map = {b["action"]: b for b in branches}
     rows = []
     for branch in branches:

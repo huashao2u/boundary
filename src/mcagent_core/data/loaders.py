@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -244,12 +245,71 @@ def _load_mintqa(dataset_root: Path, split: str, limit: int | None) -> list[Unif
     return samples
 
 
+def _load_or_bench(dataset_root: Path, split: str, limit: int | None) -> list[UnifiedSample]:
+    del split  # OR-Bench ships train CSVs only.
+    pd = _require_pandas()
+    source_specs = [
+        ("or-bench-80k.csv", "benign", False, 0.6),
+        ("or-bench-hard-1k.csv", "hard", False, 0.2),
+        ("or-bench-toxic.csv", "toxic", True, 0.2),
+    ]
+    source_limits: list[int | None]
+    if limit is None:
+        source_limits = [None] * len(source_specs)
+    else:
+        raw_limits = [limit * weight for *_, weight in source_specs]
+        source_limits = [int(math.floor(value)) for value in raw_limits]
+        remainder = limit - sum(value for value in source_limits if value is not None)
+        ranked_remainders = sorted(
+            range(len(raw_limits)),
+            key=lambda index: raw_limits[index] - math.floor(raw_limits[index]),
+            reverse=True,
+        )
+        for index in ranked_remainders[:remainder]:
+            source_limits[index] = int(source_limits[index] or 0) + 1
+    samples: list[UnifiedSample] = []
+    for (file_name, label, should_refuse, _weight), source_limit in zip(source_specs, source_limits):
+        csv_path = dataset_root / "or-bench" / file_name
+        if source_limit == 0:
+            continue
+        frame = pd.read_csv(csv_path, nrows=source_limit)
+        for index, row in frame.iterrows():
+            category = str(row.get("category", ""))
+            samples.append(
+                UnifiedSample(
+                    id=f"or_bench-{label}-{index}",
+                    dataset="or_bench",
+                    question=str(row["prompt"]),
+                    gold_answer="REFUSE" if should_refuse else "ANSWER",
+                    metadata={
+                        "split": "train",
+                        "source_file": file_name,
+                        "category": category,
+                        "boundary_type": "refusal",
+                        "task_type": "refusal_boundary",
+                        "can_search": False,
+                        "can_calculate": False,
+                        "can_clarify": False,
+                        "allow_refuse": True,
+                        "or_bench_label": label,
+                        "should_refuse": should_refuse,
+                    },
+                    task_type="refusal_boundary",
+                )
+            )
+            if limit is not None and len(samples) >= limit:
+                return samples
+    return samples
+
+
 DATASET_LOADERS = {
     "gsm8k": _load_gsm8k,
     "competition_math": _load_competition_math,
     "freshqa": _load_freshqa,
     "in3": _load_in3,
     "mintqa": _load_mintqa,
+    "or_bench": _load_or_bench,
+    "or-bench": _load_or_bench,
 }
 
 

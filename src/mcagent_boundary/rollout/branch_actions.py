@@ -31,6 +31,8 @@ from mcagent_boundary.rollout.candidate_schema import (
 )
 from mcagent_boundary.rollout.state import build_state
 from mcagent_boundary.scoring.correctness import evaluate_branch_correctness
+from mcagent_boundary.scoring.helpfulness import outcome_helpfulness
+from mcagent_boundary.scoring.utility import utility_real
 
 
 PROMPT_ROOT = Path(__file__).resolve().parents[1] / "prompts"
@@ -102,15 +104,14 @@ def _run_finalize_pass(policy, sample, candidate: dict[str, Any], observation: d
             "Return JSON with final_decision only."
         )
         if hasattr(policy, "finalize_after_tool"):
-            return policy.finalize_after_tool(sample, candidate, observation)
+            return policy.finalize_after_tool(sample, candidate, observation, full_prompt)
         # DEPRECATED(mainline): eval-only fallback when a policy lacks a
         # finalize method; never used by train-side annotation.
         final_answer, final_status = _finalize_after_tool_heuristic(candidate["action"], observation)
         return {"final_answer": final_answer or "", "final_status": final_status}
     except Exception as exc:
         logger.warning("finalize_after_tool failed for action %s: %s", candidate["action"], exc)
-        final_answer, final_status = _finalize_after_tool_heuristic(candidate["action"], observation)
-        return {"final_answer": final_answer or "", "final_status": final_status}
+        return {"final_answer": "", "final_status": "finalize_parse_failed", "finalize_error": str(exc)}
 
 
 def _branch_summary(branch: dict[str, Any]) -> str:
@@ -119,6 +120,41 @@ def _branch_summary(branch: dict[str, Any]) -> str:
         f"outcome={branch.get('outcome_label')}, correctness={branch.get('correctness')}, "
         f"status={branch.get('final_status')}"
     )
+
+
+def _real_outcome_label(example, branch: dict[str, Any], branch_map: dict[str, dict[str, Any]], semantic_tags: dict[str, bool]) -> str:
+    action = str(branch.get("action", "")).upper()
+    helpful = outcome_helpfulness(example, branch, branch_map, semantic_tags)
+    if action == "ANSWER":
+        return "ANSWER_correct" if branch.get("correctness") is True else "ANSWER_wrong"
+    if action == "REFUSE":
+        return "REFUSE_justified" if helpful else "REFUSE_unjustified"
+    return f"{action}_{'helpful' if helpful else 'unhelpful'}"
+
+
+def _score_eval_branches_real(
+    branches: list[dict[str, Any]],
+    example,
+    semantic_tags: dict[str, bool],
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    branch_map = {branch["action"]: branch for branch in branches}
+    valid_for_scoring = [
+        branch for branch in branches if branch.get("valid_for_eval_scoring", True)
+    ]
+    for branch in branches:
+        if not branch.get("valid_for_eval_scoring", True):
+            branch["utility_real"] = None
+            branch["outcome_label_real"] = "invalid_for_eval_scoring"
+            continue
+        branch["utility_real"] = utility_real(branch, example, branch_map, semantic_tags, config)
+        branch["outcome_label_real"] = _real_outcome_label(example, branch, branch_map, semantic_tags)
+    best = max(valid_for_scoring, key=lambda branch: branch["utility_real"], default=None)
+    natural = next((branch for branch in branches if branch.get("rank") == 1), None)
+    return {
+        "best_action_real": None if best is None else best["action"],
+        "natural_branch_real": natural,
+    }
 
 
 def _build_annotation_branches(
@@ -203,6 +239,14 @@ def _build_eval_branches(
             final_answer = finalize_result.get("final_answer")
             final_status = finalize_result.get("final_status", f"completed_after_{action.lower()}")
             finalize_decision = finalize_result
+            valid_for_eval_scoring = final_status != "finalize_parse_failed"
+            if not valid_for_eval_scoring:
+                diagnostics.append({
+                    "example_id": example_id,
+                    "action": action,
+                    "rank": candidate.get("rank"),
+                    "issue": "finalize_parse_failed",
+                })
         correctness = evaluate_branch_correctness(example, final_answer, action, semantic_tags)
         branches.append({
             "action": action,
@@ -220,6 +264,7 @@ def _build_eval_branches(
             "final_status": final_status,
             "correctness": correctness,
             "finalize_decision": finalize_decision,
+            "valid_for_eval_scoring": True if action == "ANSWER" else valid_for_eval_scoring,
             "is_student_candidate": True,
             "is_debug_fallback": False,
         })
@@ -244,6 +289,12 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
 
     raw_candidates = policy_output.candidates
     diagnostics: list[dict[str, Any]] = []
+    top_k_actions = int(config.get("rollout", {}).get("top_k_actions", 3))
+    diagnostics.append({
+        "example_id": example.example_id,
+        "issue": "candidate_parse_config",
+        "top_k_actions": top_k_actions,
+    })
 
     # Determine annotation vs eval mode.
     annotation_cfg = config.get("annotation", {})
@@ -268,6 +319,22 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         })
 
     candidates = canonicalize_candidates(raw_candidates)
+    allowed_actions = set(example.allowed_actions())
+    filtered_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        action = str(candidate.get("action", "")).upper()
+        if action not in allowed_actions:
+            diagnostics.append({
+                "example_id": example.example_id,
+                "action": action,
+                "rank": candidate.get("rank"),
+                "issue": "candidate_action_not_allowed",
+                "allowed_actions": sorted(allowed_actions),
+            })
+            continue
+        filtered_candidates.append(candidate)
+    candidates = [{**candidate, "rank": index + 1} for index, candidate in enumerate(filtered_candidates)]
+
     for candidate in candidates:
         if not candidate.get("valid_candidate"):
             diagnostics.append({
@@ -279,6 +346,20 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
             })
 
     valid_candidate_list = valid_candidates(candidates)
+    valid_actions = {str(candidate.get("action", "")).upper() for candidate in valid_candidate_list}
+    if "ANSWER" not in valid_actions:
+        diagnostics.append({
+            "example_id": example.example_id,
+            "issue": "invalid_missing_answer",
+            "detail": "ANSWER missing after allowed-action/schema filtering.",
+        })
+    if len(valid_candidate_list) < 2:
+        diagnostics.append({
+            "example_id": example.example_id,
+            "issue": "invalid_single_action",
+            "detail": "Fewer than two valid candidates after allowed-action/schema filtering.",
+            "valid_candidate_count": len(valid_candidate_list),
+        })
     empty_action_input_count = sum(
         1
         for candidate in candidates
@@ -288,6 +369,22 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
             for diag in (candidate.get("schema_diagnostics") or [])
         )
     )
+    candidate_action_logprobs = [
+        {
+            key: candidate.get(key)
+            for key in (
+                "rank",
+                "action",
+                "action_json_logprob_sum",
+                "action_json_logprob_mean",
+                "action_json_num_tokens",
+                "missing_logprob_positions",
+            )
+            if key in candidate
+        }
+        for candidate in valid_candidate_list
+        if candidate.get("action_json_logprob_mean") is not None
+    ]
 
     process_details = compute_process_feature_details(
         reason_prefix=reason_prefix,
@@ -297,6 +394,9 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         candidate_confidences=[candidate.get("confidence") for candidate in valid_candidate_list],
         action_probabilities=policy_output.action_probabilities,
         action_scores=policy_output.action_scores,
+        candidate_action_logprobs=candidate_action_logprobs,
+        candidates=valid_candidate_list,
+        candidate_logprob_config=dict(config.get("rollout", {}).get("candidate_logprob_scoring") or {}),
         confidence_source=policy_output.confidence_source,
     )
     process_features = dict(process_details["features"])
@@ -308,10 +408,12 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
             valid_candidate_list, example, base_semantic_tags, config, phase, policy, diagnostics,
             example.example_id,
         )
+        eval_real = _score_eval_branches_real(branches, example, base_semantic_tags, config)
     else:
         branches = _build_annotation_branches(
             valid_candidate_list, example, base_semantic_tags, diagnostics, example.example_id
         )
+        eval_real = {"best_action_real": None, "natural_branch_real": None}
 
     # Build ranked_actions placeholder (utility_rel computed downstream).
     ranked_actions = [
@@ -354,6 +456,7 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         "active_semantic_tags": resolved_active_tags,
         "semantic_tag_evidence": semantic_tag_evidence,
         "candidates": candidates,
+        "candidate_action_logprobs": candidate_action_logprobs,
         "valid_candidate_count": len(valid_candidate_list),
         "invalid_candidate_count": len(candidates) - len(valid_candidate_list),
         "empty_action_input_count": empty_action_input_count,
@@ -361,7 +464,10 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         "branch_summaries": [_branch_summary(b) for b in branches],
         "ranked_actions": ranked_actions,
         "best_action": best_action,
+        "best_action_real": eval_real["best_action_real"],
         "natural_action": valid_candidate_list[0]["action"] if valid_candidate_list else None,
+        "natural_branch": eval_real["natural_branch_real"],
+        "natural_branch_real": eval_real["natural_branch_real"],
         "natural_action_confidence": valid_candidate_list[0].get("confidence") if valid_candidate_list else None,
         "natural_action_input": valid_candidate_list[0].get("action_input", {}) if valid_candidate_list else {},
         "action_scores": policy_output.action_scores,

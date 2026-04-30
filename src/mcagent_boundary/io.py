@@ -60,3 +60,22 @@ def write_jsonl(path: str | Path, records: Iterable[dict[str, Any]]) -> None:
         for record in records:
             handle.write(json.dumps(to_jsonable(record), ensure_ascii=False) + "\n")
 
+
+def write_jsonl_by_dataset(
+    path: str | Path,
+    records: Iterable[dict[str, Any]],
+    *,
+    dataset_key: str = "dataset",
+) -> dict[str, str]:
+    output_path = Path(path)
+    materialized = list(records)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in materialized:
+        dataset = str(record.get(dataset_key) or "unknown")
+        grouped.setdefault(dataset, []).append(record)
+    outputs: dict[str, str] = {}
+    for dataset, dataset_records in grouped.items():
+        dataset_path = output_path.parent / "by_dataset" / dataset / output_path.name
+        write_jsonl(dataset_path, dataset_records)
+        outputs[dataset] = str(dataset_path)
+    return outputs

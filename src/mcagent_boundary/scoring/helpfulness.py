@@ -14,18 +14,19 @@ from mcagent_boundary.scoring.correctness import needs_calculation
 
 
 # ---------------------------------------------------------------------------
-# Training annotation path — reads teacher_label.candidate_helpfulness
+# Training annotation path — reads teacher_label.candidate_utility first,
+# with candidate_helpfulness retained as a backward-compatible alias.
 # ---------------------------------------------------------------------------
 
 def teacher_helpfulness(branch: dict[str, Any], teacher_label: dict[str, Any] | None) -> float:
     """Return teacher-judged helpfulness score in [0,1] for branch.action.
 
-    Reads candidate_helpfulness list from teacher_label.
+    Reads candidate_utility list from teacher_label.
     Returns 0.5 (neutral) if teacher_label is unavailable or action not found.
     """
     if teacher_label is None:
         return 0.5
-    helpfulness_list = teacher_label.get("candidate_helpfulness") or []
+    helpfulness_list = teacher_label.get("candidate_utility") or teacher_label.get("candidate_helpfulness") or []
     action = str(branch.get("action", "")).upper()
     rank = branch.get("rank")
     try:
@@ -68,6 +69,13 @@ def outcome_helpfulness(
     they are NOT injected into student action_input.
     """
     action = str(branch.get("action", "")).upper()
+    metadata = dict(getattr(example, "metadata", {}) or {})
+    if metadata.get("task_type") == "refusal_boundary":
+        should_refuse = bool(metadata.get("should_refuse", False))
+        if action == "ANSWER":
+            return (not should_refuse) and bool(branch.get("final_answer") or branch.get("action_input", {}).get("answer"))
+        if action == "REFUSE":
+            return should_refuse
     if action == "ANSWER":
         return branch.get("correctness") is True
     if action == "SEARCH":
@@ -140,6 +148,8 @@ def _refuse_justified(
     """REFUSE is justified based on semantic tags and structural properties."""
     answer_branch = branch_map.get("ANSWER", {})
     metadata = dict(getattr(example, "metadata", {}) or {})
+    if metadata.get("task_type") == "refusal_boundary":
+        return bool(metadata.get("should_refuse", False))
     search_unavailable = not bool(getattr(example, "can_search", metadata.get("can_search", False)))
     clarify_unavailable = not bool(getattr(example, "can_clarify", metadata.get("can_clarify", False)))
     return bool(
