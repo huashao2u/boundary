@@ -1,0 +1,71 @@
+{
+  "seed": 20260506,
+  "source_pairs": "artifacts_v023_full_20260430T153529Z/train_step_dpo_pairs.jsonl",
+  "sampling": "100 per dataset; within-dataset chosen_action stratified with min rare-action coverage",
+  "datasets": {
+    "gsm8k": {
+      "available": 1778,
+      "sampled": 100,
+      "available_chosen_action": {
+        "ANSWER": 1638,
+        "CALCULATE": 140
+      },
+      "sampled_chosen_action": {
+        "ANSWER": 90,
+        "CALCULATE": 10
+      }
+    },
+    "in3": {
+      "available": 1015,
+      "sampled": 100,
+      "available_chosen_action": {
+        "ANSWER": 240,
+        "CLARIFY": 772,
+        "REFUSE": 3
+      },
+      "sampled_chosen_action": {
+        "ANSWER": 24,
+        "CLARIFY": 73,
+        "REFUSE": 3
+      }
+    },
+    "math": {
+      "available": 1764,
+      "sampled": 100,
+      "available_chosen_action": {
+        "ANSWER": 1632,
+        "CALCULATE": 132
+      },
+      "sampled_chosen_action": {
+        "ANSWER": 90,
+        "CALCULATE": 10
+      }
+    },
+    "mintqa": {
+      "available": 2798,
+      "sampled": 100,
+      "available_chosen_action": {
+        "ANSWER": 31,
+        "REFUSE": 27,
+        "SEARCH": 2740
+      },
+      "sampled_chosen_action": {
+        "ANSWER": 10,
+        "REFUSE": 10,
+        "SEARCH": 80
+      }
+    },
+    "or_bench": {
+      "available": 2093,
+      "sampled": 100,
+      "available_chosen_action": {
+        "ANSWER": 1634,
+        "REFUSE": 459
+      },
+      "sampled_chosen_action": {
+        "ANSWER": 78,
+        "REFUSE": 22
+      }
+    }
+  }
+}

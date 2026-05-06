@@ -1,0 +1,72 @@
+<View>
+  <Style>
+    .block { margin: 12px 0; padding: 10px; border: 1px solid #ddd; }
+    .meta { color: #555; font-size: 13px; }
+    pre { white-space: pre-wrap; }
+  </Style>
+
+  <Header value="Pair Review"/>
+  <View className="block">
+    <Text name="meta" value="Review ID: $review_id | Dataset: $dataset | Boundary: $boundary_type | Pool: $pool"/>
+    <Text name="ids" value="Example: $example_id | State: $state_id"/>
+  </View>
+
+  <View className="block">
+    <Header value="Question"/>
+    <Text name="question" value="$question"/>
+    <Header value="Gold / Reference"/>
+    <Text name="gold_answer" value="$gold_answer"/>
+  </View>
+
+  <View className="block">
+    <Header value="Student Reasoning"/>
+    <Text name="student_reasoning_attempt" value="$student_reasoning_attempt"/>
+    <Header value="Student Candidates JSON"/>
+    <Text name="student_candidates_json" value="$student_candidates_json"/>
+  </View>
+
+  <View className="block">
+    <Header value="Teacher Label"/>
+    <Text name="teacher_action" value="Recommended action: $teacher_recommended_action"/>
+    <Text name="teacher_rationale" value="$teacher_rationale"/>
+    <Text name="teacher_candidate_utility_json" value="$teacher_candidate_utility_json"/>
+    <Text name="teacher_semantic_tags_json" value="Semantic tags: $teacher_semantic_tags_json"/>
+  </View>
+
+  <View className="block">
+    <Header value="Constructed Pair"/>
+    <Text name="pair_actions" value="Chosen: $chosen_action | Rejected: $rejected_action"/>
+    <Header value="Chosen Completion"/>
+    <Text name="chosen_text" value="$chosen_text"/>
+    <Header value="Rejected Completion"/>
+    <Text name="rejected_text" value="$rejected_text"/>
+    <Header value="Pair Metadata"/>
+    <Text name="pair_metadata_json" value="$pair_metadata_json"/>
+  </View>
+
+  <Header value="Human Review"/>
+  <Choices name="teacher_action_ok" toName="question" choice="single" showInLine="true" required="true">
+    <Choice value="teacher_action_ok"/>
+    <Choice value="teacher_action_bad"/>
+    <Choice value="unclear"/>
+  </Choices>
+  <Choices name="teacher_scores_ok" toName="teacher_candidate_utility_json" choice="single" showInLine="true" required="true">
+    <Choice value="scores_order_ok"/>
+    <Choice value="scores_order_bad"/>
+    <Choice value="scores_unclear"/>
+  </Choices>
+  <Choices name="pair_ok" toName="pair_actions" choice="single" showInLine="true" required="true">
+    <Choice value="chosen_better"/>
+    <Choice value="rejected_better_or_equal"/>
+    <Choice value="pair_unclear"/>
+  </Choices>
+  <Choices name="issue_type" toName="pair_actions" choice="multiple" showInLine="false">
+    <Choice value="teacher_wrong_action"/>
+    <Choice value="teacher_score_inconsistent"/>
+    <Choice value="pair_builder_bad_choice"/>
+    <Choice value="candidate_schema_issue"/>
+    <Choice value="gold_reference_issue"/>
+    <Choice value="prompt_or_display_issue"/>
+  </Choices>
+  <TextArea name="notes" toName="pair_actions" rows="4" placeholder="Optional notes"/>
+</View>
