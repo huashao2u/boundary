@@ -9,15 +9,19 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from mcagent_boundary.config import load_boundary_config, resolve_repo_path
-from mcagent_boundary.io import write_json, write_jsonl, write_jsonl_by_dataset
-from mcagent_boundary.mining.anchor_sampling import sample_anchor_pools
-from mcagent_boundary.mining.boundary_mining import mine_boundary_states
+from mcagent_boundary.io import write_jsonl, write_jsonl_by_dataset
+from mcagent_boundary.rollout.dataset_selection import selection_summary
 from mcagent_boundary.rollout.generate_rollouts import generate_rollouts
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run full train-side boundary rollouts and mining.")
+    parser = argparse.ArgumentParser(description="Run train-side student rollouts only.")
     parser.add_argument("--limit-per-dataset", type=int, default=None)
+    parser.add_argument(
+        "--full-dataset",
+        action="store_true",
+        help="Ignore rollout.limit_per_dataset and rollout every available example.",
+    )
     parser.add_argument(
         "--backend",
         choices=["hf", "vllm", "heuristic", "auto"],
@@ -35,6 +39,12 @@ def main() -> None:
         type=str,
         default=None,
         help="Comma-separated dataset subset. Defaults to configured train datasets.",
+    )
+    parser.add_argument(
+        "--selection-preset",
+        default="none",
+        choices=["none", "v023_full_rollout"],
+        help="Apply a named post-load dataset selection plan.",
     )
     parser.add_argument("--output-dir", type=str, default=None, help="Override output directory for all artifacts.")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
@@ -55,7 +65,12 @@ def main() -> None:
         config,
         dataset_names=dataset_names,
         phase=str(config["rollout"]["search_mode_train"]),
-        limit_per_dataset=args.limit_per_dataset if args.limit_per_dataset is not None else config["rollout"]["limit_per_dataset"],
+        limit_per_dataset=(
+            None
+            if args.full_dataset
+            else args.limit_per_dataset if args.limit_per_dataset is not None else config["rollout"]["limit_per_dataset"]
+        ),
+        selection_preset=args.selection_preset,
         show_progress=not args.no_progress,
     )
 
@@ -68,28 +83,12 @@ def main() -> None:
     rollout_output = _out("rollout_output")
     write_jsonl(rollout_output, rollouts)
     rollout_by_dataset = write_jsonl_by_dataset(rollout_output, rollouts)
-
-    mined = mine_boundary_states(rollouts, config)
-    sampled = sample_anchor_pools(mined, config)
-    write_json(_out("mining_output"), mined["summary"])
-    boundary_path = _out("boundary_candidates_output")
-    clear_answer_path = _out("clear_answer_output")
-    clear_external_path = _out("clear_external_output")
-    write_jsonl(boundary_path, sampled["boundary_candidates"])
-    write_jsonl(clear_answer_path, sampled["clear_answer_anchors"])
-    write_jsonl(clear_external_path, sampled["clear_external_anchors"])
-    boundary_by_dataset = write_jsonl_by_dataset(boundary_path, sampled["boundary_candidates"])
-    clear_answer_by_dataset = write_jsonl_by_dataset(clear_answer_path, sampled["clear_answer_anchors"])
-    clear_external_by_dataset = write_jsonl_by_dataset(clear_external_path, sampled["clear_external_anchors"])
     print(
         json.dumps(
             {
                 "rollout_output": str(rollout_output),
                 "rollout_by_dataset": rollout_by_dataset,
-                "boundary_by_dataset": boundary_by_dataset,
-                "clear_answer_by_dataset": clear_answer_by_dataset,
-                "clear_external_by_dataset": clear_external_by_dataset,
-                "summary": mined["summary"],
+                "selection": selection_summary(rollouts),
             },
             ensure_ascii=False,
             indent=2,

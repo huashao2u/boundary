@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import concurrent.futures
+from collections import deque
 import json
 import logging
 from pathlib import Path
-from typing import Any
+import threading
+import time
+from typing import Any, Callable
 
-from mcagent_boundary.annotation.poe_client import PoeChatClient
-from mcagent_boundary.rollout.candidate_schema import is_valid_candidate
+from mcagent_boundary.annotation.openai_compatible_client import OpenAICompatibleChatClient
+from mcagent_boundary.rollout.candidate_schema import is_valid_candidate, valid_as_rejected
 
 
 PROMPT_ROOT = Path(__file__).resolve().parents[1] / "prompts"
@@ -23,7 +27,7 @@ def _read_prompt(name: str) -> str:
 # ---------------------------------------------------------------------------
 # DEPRECATED(mainline): rule fallback labels are retained for smoke/offline
 # debugging only. Main experiment runs must call 03_teacher_label_boundary.py
-# with --strict-teacher and should only accept source == "poe_teacher".
+# with --strict-teacher and should require the configured teacher source.
 
 _ACTION_FALLBACK_SCORES: dict[str, dict[str, float]] = {
     # base score per action (before semantic tag adjustment)
@@ -246,7 +250,7 @@ def _fallback_label(record: dict[str, Any]) -> dict[str, Any]:
     best_action = str(record.get("best_action", "ANSWER")).upper()
     tags = list(record.get("active_semantic_tags", []))
     active_tags = set(tags)
-    candidates = [c for c in list(record.get("candidates", [])) if is_valid_candidate(c)]
+    candidates = [c for c in list(record.get("candidates", [])) if valid_as_rejected(c)]
 
     # Restrict best_action to actual candidates
     cand_actions = {str(c.get("action", "")).upper() for c in candidates}
@@ -270,6 +274,176 @@ def _fallback_label(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class _RequestRateLimiter:
+    def __init__(self, requests_per_minute: int | None) -> None:
+        self.requests_per_minute = int(requests_per_minute or 0)
+        self._window_seconds = 60.0
+        self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        if self.requests_per_minute <= 0:
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._timestamps and now - self._timestamps[0] >= self._window_seconds:
+                    self._timestamps.popleft()
+                if len(self._timestamps) < self.requests_per_minute:
+                    self._timestamps.append(now)
+                    return
+                sleep_for = self._window_seconds - (now - self._timestamps[0])
+            time.sleep(max(0.05, sleep_for))
+
+
+def _label_one_record(
+    record: dict[str, Any],
+    *,
+    system_prompt: str,
+    user_prompt_template: str,
+    client: OpenAICompatibleChatClient,
+    allow_rule_fallback: bool,
+    rate_limiter: _RequestRateLimiter,
+    validation_retries: int,
+) -> tuple[dict[str, Any], str]:
+    candidates = [c for c in list(record.get("candidates", [])) if valid_as_rejected(c)]
+    fallback = _fallback_label(record)
+
+    # Build student_candidates JSON for prompt. Invalid candidates are excluded.
+    student_candidates_for_prompt = [
+        {
+            "rank": c.get("rank", i + 1),
+            "action": str(c.get("action", "")).upper(),
+            "brief_rationale": str(c.get("brief_rationale", "")),
+            "confidence": c.get("confidence"),
+            "action_input": c.get("canonical_action_input") or c.get("action_input") or {},
+            "action_json_logprob_mean": c.get("action_json_logprob_mean"),
+            "action_json_logprob_sum": c.get("action_json_logprob_sum"),
+            "action_json_num_tokens": c.get("action_json_num_tokens"),
+            "missing_logprob_positions": c.get("missing_logprob_positions"),
+            "valid_candidate": bool(c.get("valid_candidate")),
+            "candidate_status": c.get("candidate_status"),
+            "valid_for_chosen": bool(c.get("valid_for_chosen", is_valid_candidate(c))),
+            "valid_for_rejected": bool(c.get("valid_for_rejected", valid_as_rejected(c))),
+            "schema_diagnostics": c.get("schema_diagnostics", []),
+        }
+        for i, c in enumerate(candidates)
+    ]
+
+    dataset_boundary = json.dumps(
+        {
+            "dataset": record.get("dataset", ""),
+            "boundary_type": record.get("boundary_type", ""),
+        },
+        ensure_ascii=False,
+    )
+
+    user_prompt = user_prompt_template.format(
+        question=record["question"],
+        gold_reference=json.dumps(
+            {
+                "gold_answer": record.get("gold_answer"),
+                "metadata_refusal_label": {
+                    "should_refuse": (record.get("metadata") or {}).get("should_refuse"),
+                    "or_bench_label": (record.get("metadata") or {}).get("or_bench_label"),
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        reason_attempt=record.get("reasoning_attempt", record.get("reason_prefix", "")),
+        uncertainty_summary=record.get("uncertainty_summary", ""),
+        student_candidates=json.dumps(student_candidates_for_prompt, ensure_ascii=False, indent=2),
+        process_features=json.dumps(record.get("process_features", {}), ensure_ascii=False),
+        semantic_tag_evidence=json.dumps(record.get("semantic_tag_evidence", {}), ensure_ascii=False, indent=2),
+        semantic_hints=json.dumps(record.get("active_semantic_tags", []), ensure_ascii=False),
+        dataset_boundary=dataset_boundary,
+    )
+    required_candidates_for_repair = [
+        {
+            "rank": item["rank"],
+            "action": item["action"],
+            "action_input": item["action_input"],
+            "brief_rationale": item["brief_rationale"],
+        }
+        for item in student_candidates_for_prompt
+    ]
+
+    payload = fallback
+    source = "rule_fallback"
+    counter_key = "fallback"
+    if not client.is_ready() and not allow_rule_fallback:
+        raise RuntimeError("Teacher credentials are not configured and rule fallback is disabled.")
+    if client.is_ready():
+        try:
+            validation_prompt = user_prompt
+            for attempt in range(validation_retries + 1):
+                rate_limiter.acquire()
+                raw = client.complete_json(system_prompt=system_prompt, user_prompt=validation_prompt)
+                try:
+                    payload = _validate_teacher_payload(
+                        raw,
+                        fallback_action=fallback["recommended_action"],
+                        candidates=candidates,
+                        allow_score_fallback=allow_rule_fallback,
+                    )
+                    break
+                except Exception as validation_exc:
+                    if attempt >= validation_retries:
+                        raise
+                    validation_prompt = (
+                        "Repair the previous annotation JSON. Return corrected JSON only.\n"
+                        f"Validation error: {validation_exc}\n"
+                        "The candidate_utility array must contain exactly one score entry for each "
+                        "required candidate below, matching both rank and action. Do not omit any "
+                        "candidate, even if its action looks wrong.\n"
+                        "Required candidates:\n"
+                        f"{json.dumps(required_candidates_for_repair, ensure_ascii=False, indent=2)}\n"
+                        "Question:\n"
+                        f"{record['question']}\n"
+                        "Gold/reference for offline judging only:\n"
+                        f"{record.get('gold_answer')}\n"
+                        "Previous invalid response:\n"
+                        f"{json.dumps(raw, ensure_ascii=False)}\n"
+                        "Return the full JSON object with semantic_tags, meta_reflection, "
+                        "candidate_utility, candidate_helpfulness, recommended_action, rationale, "
+                        "preferred_over, and rubric_degenerate."
+                    )
+            source = client.source_label
+            counter_key = "success"
+        except Exception as exc:
+            logger.warning(
+                "Teacher call failed for example %s: %s", record.get("example_id"), exc
+            )
+            if not allow_rule_fallback:
+                raise RuntimeError(
+                    f"Teacher call failed for example {record.get('example_id')}; "
+                    "rule fallback is disabled."
+                ) from exc
+            payload = {
+                **fallback,
+                "rationale": f"{fallback['rationale']} Teacher call failed: {exc}",
+            }
+            source = "rule_fallback_after_failure"
+            counter_key = "failure"
+
+    return (
+        {
+            "state_id": record["state_id"],
+            "example_id": record["example_id"],
+            "dataset": record["dataset"],
+            "boundary_type": record["boundary_type"],
+            "question": record["question"],
+            "source": source,
+            "teacher_provider": client.provider,
+            "teacher_model": client.model,
+            "num_valid_candidates": len(candidates),
+            **payload,
+        },
+        counter_key,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main labeling function
 # ---------------------------------------------------------------------------
@@ -280,125 +454,116 @@ def label_boundary_records(
     *,
     show_progress: bool = True,
     allow_rule_fallback: bool = True,
+    teacher_workers: int | None = None,
+    rpm_limit: int | None = None,
+    on_label: Callable[[dict[str, Any]], None] | None = None,
+    skip_failed: bool = False,
+    on_failure: Callable[[dict[str, Any], Exception], None] | None = None,
 ) -> list[dict[str, Any]]:
     from mcagent_boundary.progress import make_progress
 
     system_prompt = _read_prompt("teacher_tag_reflect.md")
     user_prompt_template = _read_prompt("teacher_action_recommend.md")
-    client = PoeChatClient(config)
-    labeled: list[dict[str, Any]] = []
+    client = OpenAICompatibleChatClient(config)
     counters = {"success": 0, "fallback": 0, "failure": 0, "skipped": 0}
-    progress = make_progress(
-        records,
-        total=len(records),
-        desc="teacher labeling",
-        unit="rec",
-        disable=not show_progress,
-    )
-    for record in progress:
-        candidates = [c for c in list(record.get("candidates", [])) if is_valid_candidate(c)]
-        fallback = _fallback_label(record)
+    teacher_cfg = config.get("teacher", {})
+    workers = int(teacher_workers or teacher_cfg.get("workers") or 1)
+    workers = max(1, workers)
+    rate_limiter = _RequestRateLimiter(rpm_limit or teacher_cfg.get("rpm_limit"))
+    validation_retries = max(0, int(teacher_cfg.get("validation_retries", 2)))
+    labeled: list[dict[str, Any] | None] = [None] * len(records)
 
-        # Build student_candidates JSON for prompt. Invalid candidates are excluded.
-        student_candidates_for_prompt = [
-            {
-                "rank": c.get("rank", i + 1),
-                "action": str(c.get("action", "")).upper(),
-                "brief_rationale": str(c.get("brief_rationale", "")),
-                "confidence": c.get("confidence"),
-                "action_input": c.get("canonical_action_input") or c.get("action_input") or {},
-                "action_json_logprob_mean": c.get("action_json_logprob_mean"),
-                "action_json_logprob_sum": c.get("action_json_logprob_sum"),
-                "action_json_num_tokens": c.get("action_json_num_tokens"),
-                "missing_logprob_positions": c.get("missing_logprob_positions"),
-                "valid_candidate": bool(c.get("valid_candidate")),
-                "schema_diagnostics": c.get("schema_diagnostics", []),
-            }
-            for i, c in enumerate(candidates)
-        ]
-
-        dataset_boundary = json.dumps(
-            {
-                "dataset": record.get("dataset", ""),
-                "boundary_type": record.get("boundary_type", ""),
-            },
-            ensure_ascii=False,
-        )
-
-        user_prompt = user_prompt_template.format(
-            question=record["question"],
-            gold_reference=json.dumps(
-                {
-                    "gold_answer": record.get("gold_answer"),
-                    "metadata_refusal_label": {
-                        "should_refuse": (record.get("metadata") or {}).get("should_refuse"),
-                        "or_bench_label": (record.get("metadata") or {}).get("or_bench_label"),
-                    },
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            reason_attempt=record.get("reasoning_attempt", record.get("reason_prefix", "")),
-            uncertainty_summary=record.get("uncertainty_summary", ""),
-            student_candidates=json.dumps(student_candidates_for_prompt, ensure_ascii=False, indent=2),
-            process_features=json.dumps(record.get("process_features", {}), ensure_ascii=False),
-            semantic_tag_evidence=json.dumps(record.get("semantic_tag_evidence", {}), ensure_ascii=False, indent=2),
-            semantic_hints=json.dumps(record.get("active_semantic_tags", []), ensure_ascii=False),
-            dataset_boundary=dataset_boundary,
-        )
-
-        payload = fallback
-        source = "rule_fallback"
-        if not client.is_ready() and not allow_rule_fallback:
-            raise RuntimeError("Teacher credentials are not configured and rule fallback is disabled.")
-        if client.is_ready():
-            try:
-                raw = client.complete_json(system_prompt=system_prompt, user_prompt=user_prompt)
-                payload = _validate_teacher_payload(
-                    raw,
-                    fallback_action=fallback["recommended_action"],
-                    candidates=candidates,
-                    allow_score_fallback=allow_rule_fallback,
-                )
-                source = "poe_teacher"
-                counters["success"] += 1
-            except Exception as exc:
-                logger.warning(
-                    "Teacher call failed for example %s: %s", record.get("example_id"), exc
-                )
-                if not allow_rule_fallback:
-                    raise RuntimeError(
-                        f"Teacher call failed for example {record.get('example_id')}; "
-                        "rule fallback is disabled."
-                    ) from exc
-                payload = {
-                    **fallback,
-                    "rationale": f"{fallback['rationale']} Teacher call failed: {exc}",
-                }
-                source = "rule_fallback_after_failure"
-                counters["failure"] += 1
-        else:
-            counters["fallback"] += 1
-
-        labeled.append(
-            {
-                "state_id": record["state_id"],
-                "example_id": record["example_id"],
-                "dataset": record["dataset"],
-                "boundary_type": record["boundary_type"],
-                "question": record["question"],
-                "source": source,
-                "num_valid_candidates": len(candidates),
-                **payload,
-            }
-        )
+    def _set_postfix(progress: Any) -> None:
         try:
             progress.set_postfix(**counters)
         except Exception:
             pass
-    try:
-        progress.close()
-    except Exception:
-        pass
+
+    if workers == 1 or len(records) <= 1:
+        progress = make_progress(
+            list(enumerate(records)),
+            total=len(records),
+            desc="teacher labeling",
+            unit="rec",
+            disable=not show_progress,
+        )
+        try:
+            for index, record in progress:
+                try:
+                    label, counter_key = _label_one_record(
+                        record,
+                        system_prompt=system_prompt,
+                        user_prompt_template=user_prompt_template,
+                        client=client,
+                        allow_rule_fallback=allow_rule_fallback,
+                        rate_limiter=rate_limiter,
+                        validation_retries=validation_retries,
+                    )
+                except Exception as exc:
+                    if not skip_failed:
+                        raise
+                    counters["failure"] += 1
+                    if on_failure:
+                        on_failure(record, exc)
+                    _set_postfix(progress)
+                    continue
+                labeled[index] = label
+                if on_label:
+                    on_label(label)
+                counters[counter_key] += 1
+                _set_postfix(progress)
+        finally:
+            try:
+                progress.close()
+            except Exception:
+                pass
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_index = {
+                executor.submit(
+                    _label_one_record,
+                    record,
+                    system_prompt=system_prompt,
+                    user_prompt_template=user_prompt_template,
+                    client=client,
+                    allow_rule_fallback=allow_rule_fallback,
+                    rate_limiter=rate_limiter,
+                    validation_retries=validation_retries,
+                ): index
+                for index, record in enumerate(records)
+            }
+            progress = make_progress(
+                concurrent.futures.as_completed(future_to_index),
+                total=len(future_to_index),
+                desc=f"teacher labeling ({workers} workers)",
+                unit="rec",
+                disable=not show_progress,
+            )
+            try:
+                for future in progress:
+                    index = future_to_index[future]
+                    try:
+                        label, counter_key = future.result()
+                    except Exception:
+                        if not skip_failed:
+                            for pending in future_to_index:
+                                pending.cancel()
+                            raise
+                        record = records[index]
+                        counters["failure"] += 1
+                        if on_failure:
+                            on_failure(record, future.exception() or RuntimeError("unknown teacher failure"))
+                        _set_postfix(progress)
+                        continue
+                    labeled[index] = label
+                    if on_label:
+                        on_label(label)
+                    counters[counter_key] += 1
+                    _set_postfix(progress)
+            finally:
+                try:
+                    progress.close()
+                except Exception:
+                    pass
     logger.info("Teacher labeling counters: %s", counters)
-    return labeled
+    return [label for label in labeled if label is not None]

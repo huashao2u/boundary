@@ -45,16 +45,91 @@ def _read_prompt(name: str) -> str:
 def build_student_prompt(example) -> str:
     """Build the student rollout prompt (v0.2: no dataset/boundary_type leak)."""
     system_prompt = _read_prompt("student_rollout.md").strip()
+    allowed_actions = example.allowed_actions()
     tool_list = ", ".join(
-        action.lower() for action in example.allowed_actions() if action != "ANSWER"
+        action.lower() for action in allowed_actions if action != "ANSWER"
     )
+    allowed_block = "Current allowed actions for this example:\n" + "\n".join(
+        f"- {action}" for action in allowed_actions
+    )
+    example_block = _dynamic_student_examples(allowed_actions)
     user_prompt = (
         f"Question: {example.question}\n\n"
         f"Constraints:\n"
         f"- Tools allowed: {tool_list or 'none'}\n"
         f"- Clarify allowed: {str(example.can_clarify)}"
     )
-    return system_prompt + "\n\n" + user_prompt
+    return system_prompt + "\n\n" + allowed_block + example_block + "\n\n" + user_prompt
+
+
+def _dynamic_student_examples(allowed_actions: list[str]) -> str:
+    actions = set(allowed_actions)
+    examples: list[str] = []
+    if "CLARIFY" in actions:
+        examples.append(
+            """
+
+### Clarify boundary example
+```json
+{
+  "reasoning": {
+    "attempt": "The request lacks a key slot: the city. I cannot make a concrete restaurant recommendation without it.",
+    "uncertainty_summary": "The city is missing.",
+    "need_external_help": true
+  },
+  "candidates": [
+    {"rank": 1, "action": "CLARIFY", "confidence": 0.86, "action_input": {"question": "Which city should I search in?"}, "brief_rationale": "The city is necessary for a useful recommendation."},
+    {"rank": 2, "action": "ANSWER", "confidence": 0.25, "action_input": {"answer": "I can suggest general date-night restaurant criteria, but I need the city to recommend a specific place."}, "brief_rationale": "A direct answer is possible only in a generic, less useful form."},
+    {"rank": 3, "action": "REFUSE", "confidence": 0.05, "action_input": {"reason": "The task is underspecified, but clarification is better than refusal."}, "brief_rationale": "Refusal is too strong because the missing information can be clarified."}
+  ]
+}
+```
+""".rstrip()
+        )
+    if "SEARCH" in actions:
+        examples.append(
+            """
+
+### Search boundary example
+```json
+{
+  "reasoning": {
+    "attempt": "The question asks about a specific long-tail fact that I may not know reliably from memory.",
+    "uncertainty_summary": "External evidence is needed to avoid hallucinating.",
+    "need_external_help": true
+  },
+  "candidates": [
+    {"rank": 1, "action": "SEARCH", "confidence": 0.82, "action_input": {"query": "specific entity relation in the question"}, "brief_rationale": "A targeted search is needed for reliable evidence."},
+    {"rank": 2, "action": "ANSWER", "confidence": 0.18, "action_input": {"answer": "I cannot determine the answer reliably from internal knowledge alone."}, "brief_rationale": "A direct answer would be unsupported."},
+    {"rank": 3, "action": "REFUSE", "confidence": 0.12, "action_input": {"reason": "Without external evidence, giving a definitive answer would be unreliable."}, "brief_rationale": "Refusal is possible but search is more helpful if available."}
+  ]
+}
+```
+""".rstrip()
+        )
+    if "REFUSE" in actions and actions <= {"ANSWER", "REFUSE"}:
+        examples.append(
+            """
+
+### Answer-vs-refuse boundary example
+```json
+{
+  "reasoning": {
+    "attempt": "The prompt may be suspicious, but I should distinguish benign requests from requests that require refusal.",
+    "uncertainty_summary": "The safe action depends on whether answering would enable harm.",
+    "need_external_help": false
+  },
+  "candidates": [
+    {"rank": 1, "action": "ANSWER", "confidence": 0.65, "action_input": {"answer": "I can give a safe, high-level response that avoids harmful operational details."}, "brief_rationale": "Benign or safety-framed requests should not be over-refused."},
+    {"rank": 2, "action": "REFUSE", "confidence": 0.35, "action_input": {"reason": "I should refuse if the request asks for harmful instructions or unsafe compliance."}, "brief_rationale": "Refusal is appropriate only when the request crosses a safety boundary."}
+  ]
+}
+```
+""".rstrip()
+        )
+    if not examples:
+        return ""
+    return "\n\nRelevant formatting examples for this action space:" + "\n".join(examples)
 
 
 def _fallback_reason(example, semantic_tags: dict[str, bool]) -> str:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from mcagent_boundary.rollout.candidate_schema import is_valid_candidate, required_input_value
+from mcagent_boundary.rollout.candidate_schema import is_valid_candidate, required_input_value, valid_as_rejected
 
 
 def _stable_process(process_features: dict[str, bool]) -> bool:
@@ -15,8 +15,6 @@ _EXCLUDED_ROLLOUT_ISSUES = {
     "invalid_candidate_output",
     "legacy_single_decision_fallback",
     "invalid_schema",
-    "invalid_missing_answer",
-    "invalid_single_action",
 }
 
 _ACTION_TAGS = {
@@ -54,6 +52,10 @@ def _candidate_actions(candidates: list[dict[str, Any]]) -> list[str]:
 
 def _valid_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [candidate for candidate in candidates if is_valid_candidate(candidate)]
+
+
+def _trainable_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [candidate for candidate in candidates if valid_as_rejected(candidate)]
 
 
 def _confidence_margin(candidates: list[dict[str, Any]]) -> float | None:
@@ -105,6 +107,13 @@ def _has_real_action_competition(
     if _has_non_answer_pressure(natural_action, actions, semantic_tags):
         return True
     return False
+
+
+def _dataset_threshold(dataset: str, mining_cfg: dict[str, Any], *, key: str, default_key: str) -> float:
+    by_dataset = mining_cfg.get(key) or {}
+    if dataset in by_dataset:
+        return float(by_dataset[dataset])
+    return float(mining_cfg.get(default_key, mining_cfg.get("min_delta_u", 0.5)))
 
 
 def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]], config: dict[str, Any]) -> tuple[float, list[str]]:
@@ -236,7 +245,7 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
             continue
 
         raw_candidates = list(rollout.get("candidates") or [])
-        valid_candidate_list = _valid_candidates(raw_candidates)
+        valid_candidate_list = _trainable_candidates(raw_candidates)
         total_candidates += len(raw_candidates)
         invalid_candidates += len(raw_candidates) - len(valid_candidate_list)
         empty_action_input_count += int(rollout.get("empty_action_input_count") or 0)
@@ -273,7 +282,13 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
             continue
 
         score, reasons = _boundary_score(rollout_for_pool, candidates, config)
-        natural_action = str(candidates[0].get("action") or rollout.get("natural_action") or actions[0]).upper()
+        boundary_threshold = _dataset_threshold(
+            str(rollout.get("dataset", "")),
+            mining_cfg,
+            key="boundary_threshold_by_dataset",
+            default_key="boundary_threshold_default",
+        )
+        natural_action = str(rollout.get("natural_action") or candidates[0].get("action") or actions[0]).upper()
         stable = _stable_process(rollout.get("process_features") or {})
         high_confidence = (_as_float(candidates[0].get("confidence")) or 0.0) >= 0.75
         real_competition = _has_real_action_competition(
@@ -286,6 +301,7 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
         enriched = {
             **rollout_for_pool,
             "boundary_score": score,
+            "boundary_threshold": boundary_threshold,
             "utility_gap": score,
             "candidate_actions": actions,
             "boundary_reasons": reasons,
@@ -321,13 +337,13 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
             other.append({**enriched, "pool": "other", "pool_reason": reason})
             pool_distribution["other"] += 1
             reason_distribution[reason] += 1
-        elif score >= min_delta and real_competition:
+        elif score >= boundary_threshold and real_competition:
             boundary_candidates.append({**enriched, "pool": "boundary_critical"})
             pool_distribution["boundary_critical"] += 1
             for reason in reasons:
                 reason_distribution[reason] += 1
         else:
-            reason = "no_real_action_competition" if score >= min_delta else "low_boundary_score"
+            reason = "no_real_action_competition" if score >= boundary_threshold else "low_boundary_score"
             other.append({**enriched, "pool": "other", "pool_reason": reason})
             pool_distribution["other"] += 1
             reason_distribution[reason] += 1

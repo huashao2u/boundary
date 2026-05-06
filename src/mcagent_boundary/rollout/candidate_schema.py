@@ -170,6 +170,18 @@ def canonicalize_candidate(candidate: dict[str, Any], *, rank: int | None = None
     normalized["canonical_action_input"] = canonical_input
     normalized["action_input"] = canonical_input
     normalized["valid_candidate"] = bool(valid)
+    normalized["candidate_status"] = "valid" if valid else "invalid_action_input"
+    normalized["valid_for_chosen"] = bool(valid)
+    normalized["valid_for_rejected"] = bool(valid)
+    if action == "ANSWER" and not valid:
+        required_empty = any(
+            diag.get("issue") == "empty_required_action_input" and diag.get("detail") == "answer"
+            for diag in schema_diagnostics
+        )
+        if required_empty and bool(candidate.get("is_student_candidate", True)):
+            normalized["candidate_status"] = "empty_answer_input"
+            normalized["valid_for_chosen"] = False
+            normalized["valid_for_rejected"] = True
     normalized["schema_diagnostics"] = schema_diagnostics
     normalized["is_student_candidate"] = bool(candidate.get("is_student_candidate", True))
     normalized["is_debug_fallback"] = bool(candidate.get("is_debug_fallback", False))
@@ -193,6 +205,48 @@ def is_valid_candidate(candidate: dict[str, Any]) -> bool:
         return False
     action_input = candidate.get("canonical_action_input") or candidate.get("action_input") or {}
     return isinstance(action_input, dict) and bool(_compact_string(action_input.get(required)))
+
+
+def is_empty_answer_rejected_only(candidate: dict[str, Any]) -> bool:
+    """Return True for student-proposed empty ANSWER candidates.
+
+    This supports both newly canonicalized candidates with candidate_status and
+    older rollout artifacts that only have schema_diagnostics.
+    """
+    action = str(candidate.get("action", "")).upper()
+    if action != "ANSWER":
+        return False
+    if not bool(candidate.get("is_student_candidate", True)) or bool(candidate.get("is_debug_fallback", False)):
+        return False
+    if candidate.get("candidate_status") == "empty_answer_input":
+        return True
+    diagnostics = candidate.get("schema_diagnostics") or []
+    return any(
+        isinstance(diag, dict)
+        and diag.get("issue") == "empty_required_action_input"
+        and diag.get("detail") == "answer"
+        for diag in diagnostics
+    )
+
+
+def valid_as_chosen(candidate: dict[str, Any]) -> bool:
+    return (
+        bool(candidate.get("valid_for_chosen", is_valid_candidate(candidate)))
+        and is_valid_candidate(candidate)
+        and not bool(candidate.get("is_debug_fallback", False))
+        and bool(candidate.get("is_student_candidate", True))
+    )
+
+
+def valid_as_rejected(candidate: dict[str, Any]) -> bool:
+    if (
+        bool(candidate.get("valid_for_rejected", is_valid_candidate(candidate)))
+        and is_valid_candidate(candidate)
+        and not bool(candidate.get("is_debug_fallback", False))
+        and bool(candidate.get("is_student_candidate", True))
+    ):
+        return True
+    return is_empty_answer_rejected_only(candidate)
 
 
 def valid_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

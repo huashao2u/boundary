@@ -29,7 +29,7 @@ src/mcagent_boundary/configs/dpo.yaml
 
 ## 主干流程
 
-主实验只使用学生模型真实 rollout 产生的 top-k candidates。pair 构建不合成反例，不使用规则标注，不接受非 Poe teacher 标签。
+主实验只使用学生模型真实 rollout 产生的 top-k candidates。pair 构建不合成反例，不使用规则标注，不接受非配置化 LLM teacher source 标签。
 
 ```bash
 cd /media/boundary
@@ -37,19 +37,25 @@ cd /media/boundary
 # 1. 物化标准化 adapter 缓存
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py
 
-# 2. 学生模型 rollout + boundary / anchor 挖掘
+# 2. 学生模型 rollout
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
   --backend vllm \
   --datasets gsm8k,math,in3,mintqa,or_bench
 
-# 3. Poe teacher 严格标注；失败即停止，不走规则 fallback
+# 2b. 从已有 rollout 反复挖掘 boundary / anchor
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/02b_mine_boundary.py
+
+# 3. OpenAI-compatible teacher 严格标注；失败即停止，不走规则 fallback
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py \
   --include-clear-answer \
   --strict-teacher
 
-# 4. 严格 pair 构建；只保留真实 Poe teacher 标注
+# 4. 严格 pair 构建；只保留配置中的真实 LLM teacher 标注
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
-  --require-poe-teacher
+  --require-configured-teacher-source
+
+# 4b. 可选但推荐：按数据集来源与 chosen action 对训练 pair 做下采样平衡
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/04b_balance_pairs.py
 ```
 
 250 样本 smoke/验证运行示例：
@@ -67,6 +73,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
   --limit-per-dataset 50 \
   --output-dir "$RUN_DIR"
 
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/02b_mine_boundary.py \
+  --input-dir "$RUN_DIR" \
+  --output-dir "$RUN_DIR"
+
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py \
   --input-dir "$RUN_DIR" \
   --output-dir "$RUN_DIR" \
@@ -76,10 +86,14 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
   --input-dir "$RUN_DIR" \
   --output-dir "$RUN_DIR" \
-  --require-poe-teacher
+  --require-configured-teacher-source
+
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/04b_balance_pairs.py \
+  --input-dir "$RUN_DIR" \
+  --output-dir "$RUN_DIR"
 ```
 
-`--output-dir` 只覆盖 `02/03/04` 的中间产物读写目录。`02/03/04/07` 会保留聚合 JSONL，
+`--output-dir` 只覆盖 `02/02b/03/04/04b` 的中间产物读写目录。`02/02b/03/04/04b/07` 会保留聚合 JSONL，
 并额外写入 `by_dataset/<dataset>/同名文件.jsonl`，用于按数据集来源追踪 rollout、mining、
 teacher label、DPO pair 和 eval rollout 产物。`06_train_dpo.py` 读取配置中的
 `paths.train_pair_output` / `paths.eval_pair_output`，如果要训练某个自定义 `RUN_DIR` 里的
@@ -106,10 +120,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py \
 
 ### `02_rollout_all.py`
 
-功能：运行学生 policy，解析 top-k action candidates，构建训练侧 rollout 记录，并挖掘
-`boundary_candidates`、`clear_answer_anchors`、`clear_external_anchors`。v0.2.3 默认使用 vLLM，
-并对每个 student candidate 的 action JSON 计算 teacher-forced logprob mean，作为 process
-uncertainty 诊断信号。
+功能：运行学生 policy，解析 top-k action candidates，只写训练侧 rollout 记录。v0.2.3 默认使用
+vLLM，并对每个 student candidate 的 action JSON 计算 teacher-forced logprob mean，作为
+process uncertainty 诊断信号。boundary / anchor 挖掘已拆到 `02b_mine_boundary.py`，因此可以
+基于同一份 `all_rollouts.jsonl` 反复调阈值和采样配额。
 
 参数：
 
@@ -117,7 +131,9 @@ uncertainty 诊断信号。
 - `--max-new-tokens N`：覆盖 `rollout.max_new_tokens`。
 - `--datasets a,b,c`：覆盖训练数据集列表；默认使用 `rollout.yaml` 中的 `datasets.train`。
 - `--limit-per-dataset N`：每个数据集最多 rollout N 条。
-- `--output-dir DIR`：把 rollout/mining/anchor JSONL 写入指定目录。
+- `--full-dataset`：忽略 `rollout.limit_per_dataset`，读取全量。
+- `--selection-preset {none,v023_full_rollout}`：应用命名采样方案。
+- `--output-dir DIR`：把 rollout JSONL 写入指定目录。
 - `--no-progress`：关闭进度条。
 
 主实验推荐 `vllm` 或 `hf`。`heuristic` 会读 gold，是 smoke/debug-only；主配置禁用 heuristic
@@ -133,10 +149,38 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
   --output-dir artifacts_v02_vllm_200_strict
 ```
 
+### `02b_mine_boundary.py`
+
+功能：从已有 `all_rollouts.jsonl` 读取 student rollout，运行 boundary mining 与 anchor sampling，
+写出 `mined_boundary.json`、`boundary_candidates.jsonl`、`clear_answer_anchors.jsonl`、
+`clear_external_anchors.jsonl` 以及 `by_dataset/<dataset>/...` 分片。
+
+当前默认支持两层数据集控制：
+
+- `mining.boundary_threshold_by_dataset`：按数据集设置进入 raw boundary pool 的最低分。
+- `mining.sampling.*_quota_by_dataset`：按数据集设置最终 sampled boundary / clear anchor 预算。
+
+`mining.soft_boundary_from_other.enabled` 可打开从 `other.low_boundary_score` 中补软边界；默认关闭。
+
+参数：
+
+- `--input-dir DIR`：从指定目录读取 `all_rollouts.jsonl`。
+- `--output-dir DIR`：把 mining/anchor JSONL 写入指定目录。
+
+示例：
+
+```bash
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/02b_mine_boundary.py \
+  --input-dir artifacts_v02_vllm_200_strict \
+  --output-dir artifacts_v02_vllm_200_strict
+```
+
 ### `03_teacher_label_boundary.py`
 
-功能：读取 `boundary_candidates` 和 anchor records，调用 Poe teacher 评估每个 student candidate 的
-helpfulness，写出 `teacher_labels.jsonl`。
+功能：读取 `boundary_candidates` 和 anchor records，调用 OpenAI-compatible teacher 评估每个
+student candidate 的 helpfulness，写出 `teacher_labels.jsonl`。成功标签的 `source` 来自
+`teacher.source_label`，默认是 `llm_teacher`；标签中同时记录 `teacher_provider` 与
+`teacher_model`，便于追踪实验来源。
 
 参数：
 
@@ -144,9 +188,17 @@ helpfulness，写出 `teacher_labels.jsonl`。
 - `--output-dir DIR`：把 `teacher_labels.jsonl` 写入指定目录。
 - `--include-clear-answer`：同时标注 clear-answer anchors；建议主实验开启。
 - `--strict-teacher`：禁用规则 fallback；teacher 调用失败或缺少 candidate score 时直接失败。
+- `--resume-existing`：复用输出目录中已有的 `teacher_labels.jsonl`，只补标缺失 state。
+- `--teacher-workers N`：并发 teacher 调用数；不传则使用 `teacher.workers`，默认 4。
+- `--teacher-rpm-limit N`：客户端 RPM 限速；不传则使用 `teacher.rpm_limit`，默认 240。
+- `--checkpoint-flush-every N`：每 N 条成功标注批量追加一次 checkpoint；默认 100。异常退出前会
+  先 flush 已完成 buffer，配合 `--resume-existing` 续跑。
 - `--no-progress`：关闭进度条。
 
-主实验必须使用 `--strict-teacher`，并在后续 pair 构建时要求 `source == poe_teacher`。
+主实验必须使用 `--strict-teacher`，并在后续 pair 构建时要求配置中的 teacher source。
+如果使用 OpenAI API，可将 `teacher.provider` 设为 `openai`，`api_key_env` 设为
+`OPENAI_API_KEY`，`default_base_url` 设为 `https://api.openai.com/v1`，并将
+`default_model` 改为目标 teacher 模型。
 
 示例：
 
@@ -155,7 +207,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
   --input-dir artifacts_v02_vllm_200_strict \
   --output-dir artifacts_v02_vllm_200_strict \
   --include-clear-answer \
-  --strict-teacher
+  --strict-teacher \
+  --resume-existing \
+  --teacher-workers 4 \
+  --teacher-rpm-limit 240
 ```
 
 ### `04_make_pairs.py`
@@ -164,8 +219,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 当前逻辑只从 student rollout candidates 中选 pair：
 
 - chosen：`U_rel` 最高，且 teacher rubric 不退化。
-- rejected：不同 action type，且 utility gap 不低于 `pair_construction.min_utility_gap`。
-- schema 无效、action_input 为空、debug fallback、非 Poe teacher 标签都会被过滤。
+- rejected：不同 action type，且 utility gap 不低于配置中的默认/数据集/action 动态阈值。
+- schema 无效、debug fallback、非允许 teacher source 标签会被过滤；空 `ANSWER` 只能作为 rejected-only
+  负例进入 pair，不能作为 chosen。空 `SEARCH` / `CLARIFY` / `CALCULATE` 仍会被过滤。
 - 聚合 pair 之外，会额外写 `by_dataset/<dataset>/train_step_dpo_pairs.jsonl` 和
   `by_dataset/<dataset>/eval_step_dpo_pairs.jsonl`。
 
@@ -174,7 +230,11 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 - `--input-dir DIR`：从指定目录读取 boundary/anchor/teacher JSONL。
 - `--output-dir DIR`：把 train/eval pair JSONL 写入指定目录。
 - `--require-teacher-labels`：丢弃没有 teacher label 的记录。
-- `--require-poe-teacher`：丢弃非 `poe_teacher` 标签；同时隐含 `--require-teacher-labels`。
+- `--require-configured-teacher-source`：丢弃 `source != teacher.source_label` 的标签；同时隐含
+  `--require-teacher-labels`。
+- `--require-teacher-source SOURCE`：显式指定允许的 teacher source，可传多次。
+- `--require-poe-teacher`：兼容旧命令的别名，当前按 `teacher.source_label` 过滤；如需旧数据中的
+  `poe_teacher`，请使用 `--require-teacher-source poe_teacher`。
 - `--no-progress`：关闭进度条。
 
 示例：
@@ -183,7 +243,27 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
   --input-dir artifacts_v02_vllm_200_strict \
   --output-dir artifacts_v02_vllm_200_strict \
-  --require-poe-teacher
+  --require-configured-teacher-source
+```
+
+### `04b_balance_pairs.py`
+
+功能：读取 `train_step_dpo_pairs.jsonl`，按 `pair_construction.balance.dataset_quota` 和
+`pair_construction.balance.chosen_action_quota` 对训练 pair 做确定性下采样，写出
+`train_step_dpo_pairs_balanced.jsonl` 与 `pair_balance_report.json`。该步骤不做过采样，
+也不会用数学 pair 填补 IN3/MintQA/OR-Bench 的缺口，缺口会在报告中显式记录。
+
+参数：
+
+- `--input-dir DIR`：从指定目录读取 `train_step_dpo_pairs.jsonl`。
+- `--output-dir DIR`：把 balanced JSONL 与报告写入指定目录。
+
+示例：
+
+```bash
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/04b_balance_pairs.py \
+  --input-dir artifacts_v02_vllm_200_strict \
+  --output-dir artifacts_v02_vllm_200_strict
 ```
 
 ## 下游与可选脚本

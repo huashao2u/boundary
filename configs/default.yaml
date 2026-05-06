@@ -51,10 +51,11 @@ tools:
 
 teacher:
   provider: poe
+  source_label: llm_teacher
   model_env: POE_TEACHER_MODEL
-  default_model: "gpt-4o"
+  default_model: "gpt-5-nano"
   api_key_env: POE_API_KEY
-  api_key: null
+  api_key: ""
   base_url_env: POE_BASE_URL
   default_base_url: "https://api.poe.com/v1"
   chat_completions_env: POE_CHAT_COMPLETIONS_URL
@@ -62,3 +63,7 @@ teacher:
   temperature: 0.0
   max_retries: 3
   timeout_seconds: 120
+  workers: 4
+  rpm_limit: 240
+  checkpoint_flush_every: 100
+  validation_retries: 4

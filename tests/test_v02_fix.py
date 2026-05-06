@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from mcagent_boundary.annotation.teacher_label import _validate_teacher_payload
+from mcagent_boundary.annotation.teacher_label import _validate_teacher_payload, label_boundary_records
 from mcagent_boundary.adapters.base import StandardizedExample
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
 from mcagent_boundary.rollout.branch_actions import rollout_one_example
-from mcagent_boundary.rollout.candidate_schema import canonicalize_candidate
+from mcagent_boundary.rollout.candidate_schema import canonicalize_candidate, valid_as_chosen, valid_as_rejected
+from mcagent_boundary.rollout.dataset_selection import apply_selection_preset, selection_summary
 from mcagent_boundary.rollout.state import build_state
 from mcagent_boundary.scoring.utility import utility_rel
 from mcagent_boundary.training.make_dpo_pairs import build_step_dpo_pairs
@@ -117,6 +118,23 @@ class V02FixTests(unittest.TestCase):
         config = {"scoring": {"base_value": {"ANSWER": 1.0}, "action_cost": {}, "semantic_bonus": {}}}
         self.assertEqual(utility_rel(branch, teacher_label, {}, example, config), 0.1)
 
+    def test_empty_answer_utility_is_zero_even_without_teacher_score(self):
+        branch = {
+            "action": "ANSWER",
+            "rank": 1,
+            "action_input": {"answer": ""},
+            "candidate_status": "empty_answer_input",
+            "schema_diagnostics": [{"issue": "empty_required_action_input", "detail": "answer"}],
+        }
+        teacher_label = {"candidate_utility": [{"rank": 2, "action": "SEARCH", "score": 0.8}]}
+        example = type(
+            "Example",
+            (),
+            {"gold_answer": "x", "task_type": "factual_boundary", "metadata": {}, "question": "q"},
+        )()
+        config = {"scoring": {"base_value": {"ANSWER": 1.0}, "action_cost": {}, "semantic_bonus": {}}}
+        self.assertEqual(utility_rel(branch, teacher_label, {}, example, config), 0.0)
+
     def test_to_message_dpo_row_uses_message_fields_only(self):
         pair = {
             "prompt_messages": [{"role": "user", "content": "Q"}],
@@ -207,6 +225,13 @@ class V02FixTests(unittest.TestCase):
         )
         self.assertEqual(refuse["canonical_action_input"], {"reason": "Cannot ground this."})
 
+    def test_empty_answer_is_rejected_only(self):
+        empty_answer = canonicalize_candidate({"action": "ANSWER", "action_input": {}})
+        self.assertFalse(empty_answer["valid_candidate"])
+        self.assertEqual(empty_answer["candidate_status"], "empty_answer_input")
+        self.assertFalse(valid_as_chosen(empty_answer))
+        self.assertTrue(valid_as_rejected(empty_answer))
+
     def test_teacher_payload_scores_by_rank_action_and_fills_missing(self):
         candidates = [
             canonicalize_candidate({"rank": 1, "action": "ANSWER", "action_input": {"answer": "A"}}),
@@ -223,6 +248,69 @@ class V02FixTests(unittest.TestCase):
         scores = {(entry["rank"], entry["action"]): entry["score"] for entry in validated["candidate_helpfulness"]}
         self.assertEqual(scores[(2, "SEARCH")], 0.9)
         self.assertIn((1, "ANSWER"), scores)
+
+    def test_parallel_teacher_labeling_preserves_record_order_with_fallback(self):
+        candidates = [
+            canonicalize_candidate({"rank": 1, "action": "ANSWER", "action_input": {"answer": "A"}}),
+            canonicalize_candidate({"rank": 2, "action": "SEARCH", "action_input": {"query": "A current"}}),
+        ]
+        records = [
+            {
+                "state_id": f"s{i}",
+                "example_id": f"e{i}",
+                "dataset": "mintqa",
+                "boundary_type": "factual",
+                "question": "Who is the current CEO of ExampleCo?",
+                "gold_answer": "A",
+                "metadata": {},
+                "active_semantic_tags": ["SEARCH_REQUIRED"],
+                "semantic_tag_evidence": {},
+                "process_features": {},
+                "candidates": candidates,
+            }
+            for i in range(3)
+        ]
+        config = {
+            "teacher": {
+                "api_key": "",
+                "api_key_env": "MISSING_POE_TEST_KEY",
+                "temperature": 0.0,
+                "max_retries": 1,
+                "timeout_seconds": 1,
+            }
+        }
+        labels = label_boundary_records(records, config, show_progress=False, teacher_workers=2, rpm_limit=60)
+        self.assertEqual([label["state_id"] for label in labels], ["s0", "s1", "s2"])
+        self.assertEqual({label["source"] for label in labels}, {"rule_fallback"})
+
+    def test_v023_full_rollout_selection_preset(self):
+        def ex(dataset, index, metadata=None):
+            return StandardizedExample(
+                example_id=f"{dataset}-{index}",
+                dataset=dataset,
+                split="train",
+                question="q",
+                gold_answer="a",
+                metadata=metadata or {},
+            )
+
+        examples = (
+            [ex("gsm8k", i) for i in range(3002)]
+            + [ex("math", i, {"math_level": f"Level {level}"}) for i, level in enumerate([1, 2, 3, 4, 5] * 800)]
+            + [ex("or_bench", i, {"or_bench_label": "benign"}) for i in range(4002)]
+            + [ex("or_bench", i + 5000, {"or_bench_label": "hard"}) for i in range(3)]
+            + [ex("or_bench", i + 6000, {"or_bench_label": "toxic"}) for i in range(2)]
+            + [ex("mintqa", i) for i in range(4)]
+            + [ex("in3", i) for i in range(5)]
+        )
+        selected = apply_selection_preset(examples, "v023_full_rollout")
+        summary = selection_summary(selected)
+        self.assertEqual(summary["by_dataset"]["gsm8k"], 3000)
+        self.assertEqual(summary["by_dataset"]["math"], 2400)
+        self.assertEqual(summary["math_levels"], {"Level 1": 800, "Level 2": 800, "Level 3": 800})
+        self.assertEqual(summary["or_bench_by_label"], {"benign": 4000, "hard": 3, "toxic": 2})
+        self.assertEqual(summary["by_dataset"]["mintqa"], 4)
+        self.assertEqual(summary["by_dataset"]["in3"], 5)
 
     def test_mining_requires_valid_answer_external_competition(self):
         base = {
@@ -281,6 +369,66 @@ class V02FixTests(unittest.TestCase):
         self.assertFalse(train)
         self.assertFalse(eval_pairs)
         self.assertTrue(any(item["reason"] == "not_enough_valid_candidates" for item in diagnostics))
+
+    def test_pair_builder_filters_configured_teacher_source(self):
+        answer = canonicalize_candidate(
+            {"rank": 1, "action": "ANSWER", "confidence": 0.6, "action_input": {"answer": "4"}}
+        )
+        search = canonicalize_candidate(
+            {"rank": 2, "action": "SEARCH", "confidence": 0.4, "action_input": {"query": "2+2"}}
+        )
+        record = {
+            "state_id": "source-filter",
+            "example_id": "e-source",
+            "dataset": "gsm8k",
+            "boundary_type": "reasoning",
+            "question": "What is 2+2?",
+            "gold_answer": "4",
+            "metadata": {"task_type": "math", "can_search": True},
+            "semantic_tags": {},
+            "active_semantic_tags": [],
+            "process_features": {},
+            "candidates": [answer, search],
+            "branches": [],
+            "diagnostics": [],
+        }
+        teacher_label = {
+            "state_id": "source-filter",
+            "source": "llm_teacher",
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.9, "reason": "sufficient"},
+                {"rank": 2, "action": "SEARCH", "score": 0.1, "reason": "unneeded"},
+            ],
+            "semantic_tags": [],
+            "meta_reflection": "Answer directly.",
+            "rubric_degenerate": False,
+        }
+        config = {
+            "pair_construction": {"min_utility_gap": 0.1, "require_different_action_types": True},
+            "datasets": {"eval": []},
+            "scoring": {"base_value": {"ANSWER": 1.0, "SEARCH": 0.0}, "action_cost": {}, "semantic_bonus": {}},
+        }
+        train, eval_pairs, diagnostics = build_step_dpo_pairs(
+            [record],
+            [teacher_label],
+            config,
+            show_progress=False,
+            required_teacher_sources={"llm_teacher"},
+        )
+        self.assertEqual(len(train), 1)
+        self.assertFalse(eval_pairs)
+        self.assertFalse([item for item in diagnostics if item["reason"] == "teacher_source_not_allowed"])
+
+        train, eval_pairs, diagnostics = build_step_dpo_pairs(
+            [record],
+            [teacher_label],
+            config,
+            show_progress=False,
+            required_teacher_sources={"openai_teacher"},
+        )
+        self.assertFalse(train)
+        self.assertFalse(eval_pairs)
+        self.assertTrue(any(item["reason"] == "teacher_source_not_allowed" for item in diagnostics))
 
 
 if __name__ == "__main__":

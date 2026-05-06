@@ -30,7 +30,22 @@ def main() -> None:
     parser.add_argument(
         "--require-poe-teacher",
         action="store_true",
-        help="Drop records whose teacher label source is not poe_teacher.",
+        help=(
+            "Deprecated alias for --require-configured-teacher-source. "
+            "Use --require-teacher-source poe_teacher for legacy Poe-only labels."
+        ),
+    )
+    parser.add_argument(
+        "--require-configured-teacher-source",
+        action="store_true",
+        help="Drop records whose teacher label source is not teacher.source_label.",
+    )
+    parser.add_argument(
+        "--require-teacher-source",
+        action="append",
+        default=[],
+        metavar="SOURCE",
+        help="Allowed teacher label source. May be passed multiple times.",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
@@ -54,13 +69,17 @@ def main() -> None:
     clear_external = read_jsonl(_in("clear_external_output"))
     teacher_labels = read_jsonl(_in("teacher_label_output"))
     selected_records = boundary_records + clear_answer + clear_external
+    configured_teacher_source = str(config.get("teacher", {}).get("source_label", "llm_teacher"))
+    required_teacher_sources = set(args.require_teacher_source or [])
+    if args.require_configured_teacher_source or args.require_poe_teacher:
+        required_teacher_sources.add(configured_teacher_source)
     train_pairs, eval_pairs, diagnostics = build_step_dpo_pairs(
         selected_records,
         teacher_labels,
         config,
         show_progress=not args.no_progress,
-        require_teacher_label=args.require_teacher_labels or args.require_poe_teacher,
-        require_poe_teacher=args.require_poe_teacher,
+        require_teacher_label=args.require_teacher_labels or bool(required_teacher_sources),
+        required_teacher_sources=required_teacher_sources,
     )
     train_path = _out("train_pair_output")
     eval_path = _out("eval_pair_output")
@@ -82,6 +101,7 @@ def main() -> None:
         "diagnostic_reasons": diagnostic_reasons,
         "train_output": str(train_path),
         "eval_output": str(eval_path),
+        "required_teacher_sources": sorted(required_teacher_sources),
         "train_by_dataset": train_by_dataset,
         "eval_by_dataset": eval_by_dataset,
         "diagnostics_by_dataset": diagnostics_by_dataset,

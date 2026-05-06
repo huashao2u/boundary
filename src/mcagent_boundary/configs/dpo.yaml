@@ -22,11 +22,47 @@ scoring:
 
 mining:
   min_delta_u: 0.5
+  boundary_threshold_default: 0.5
+  boundary_threshold_by_dataset:
+    gsm8k: 0.55
+    math: 0.50
+    in3: 0.45
+    mintqa: 0.55
+    or_bench: 0.45
   competition_window: 0.35
   anchor_margin: 0.5
-  max_boundary_candidates: 4000
-  max_clear_answer_anchors: 250
-  max_clear_external_anchors: 250
+  max_boundary_candidates: 9000
+  max_clear_answer_anchors: 1740
+  max_clear_external_anchors: 260
+  sampling:
+    redistribute_unused: true
+    boundary_quota_by_dataset:
+      gsm8k: 2000
+      math: 2000
+      in3: 1100
+      mintqa: 3000
+      or_bench: 900
+    clear_answer_quota_by_dataset:
+      gsm8k: 40
+      math: 80
+      in3: 80
+      mintqa: 0
+      or_bench: 1540
+    clear_external_quota_by_dataset:
+      gsm8k: 25
+      math: 25
+      in3: 25
+      mintqa: 75
+      or_bench: 110
+  soft_boundary_from_other:
+    enabled: false
+    threshold_default: 0.45
+    threshold_by_dataset:
+      gsm8k: 0.45
+      math: 0.45
+      in3: 0.40
+      mintqa: 0.45
+      or_bench: 0.35
   boundary_score_weights:
     low_u_rel_margin: 0.25
     action_diversity: 0.15

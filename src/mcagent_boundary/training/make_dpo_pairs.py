@@ -17,9 +17,15 @@ from __future__ import annotations
 import json
 import logging
 from hashlib import sha1
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 
-from mcagent_boundary.rollout.candidate_schema import is_valid_candidate, required_input_value
+from mcagent_boundary.rollout.candidate_schema import (
+    is_valid_candidate,
+    is_empty_answer_rejected_only,
+    required_input_value,
+    valid_as_chosen,
+    valid_as_rejected,
+)
 from mcagent_boundary.scoring.utility import utility_rel
 
 
@@ -35,8 +41,6 @@ _EXCLUDED_ROLLOUT_ISSUES = {
     "invalid_candidate_output",
     "legacy_single_decision_fallback",
     "invalid_schema",
-    "invalid_missing_answer",
-    "invalid_single_action",
 }
 
 
@@ -168,7 +172,7 @@ def _score_candidates(
     """
     example = _CandidateExampleProxy(record)
     semantic_tags: dict[str, bool] = dict(record.get("semantic_tags") or {})
-    candidates = [candidate for candidate in list(record.get("candidates") or []) if is_valid_candidate(candidate)]
+    candidates = [candidate for candidate in list(record.get("candidates") or []) if valid_as_rejected(candidate)]
 
     # Build a branch dict per candidate (annotation branch: no observation/correctness).
     # We pull action_input from the annotation branches if available, else from candidates.
@@ -195,6 +199,9 @@ def _score_candidates(
             "canonical_action_input": action_input,
             "rank": cand.get("rank"),
             "valid_candidate": True,
+            "candidate_status": cand.get("candidate_status", "valid" if is_valid_candidate(cand) else "empty_answer_input"),
+            "valid_for_chosen": valid_as_chosen(cand),
+            "valid_for_rejected": valid_as_rejected(cand),
             "schema_diagnostics": cand.get("schema_diagnostics", []),
             "confidence": cand.get("confidence"),
             "brief_rationale": cand.get("brief_rationale", ""),
@@ -209,6 +216,9 @@ def _score_candidates(
             "action_input": branch_dict["action_input"],
             "canonical_action_input": branch_dict["canonical_action_input"],
             "valid_candidate": True,
+            "candidate_status": branch_dict["candidate_status"],
+            "valid_for_chosen": branch_dict["valid_for_chosen"],
+            "valid_for_rejected": branch_dict["valid_for_rejected"],
             "u_rel": u_rel_val,
             "brief_rationale": cand.get("brief_rationale", ""),
         })
@@ -238,10 +248,16 @@ def _pick_chosen_rejected(
     if rubric_degenerate:
         return None
 
-    ranked = sorted(scored_candidates, key=lambda c: c["u_rel"], reverse=True)
-    chosen = ranked[0]
+    chosen_pool = [candidate for candidate in scored_candidates if valid_as_chosen(candidate)]
+    rejected_pool = [candidate for candidate in scored_candidates if valid_as_rejected(candidate)]
+    if not chosen_pool or len(rejected_pool) < 2:
+        return None
 
-    for candidate in reversed(ranked):  # iterate from lowest U_rel upward
+    ranked_chosen = sorted(chosen_pool, key=lambda c: c["u_rel"], reverse=True)
+    chosen = ranked_chosen[0]
+
+    ranked_rejected = sorted(rejected_pool, key=lambda c: c["u_rel"], reverse=True)
+    for candidate in reversed(ranked_rejected):  # iterate from lowest U_rel upward
         if require_different_action_types and candidate["action"] == chosen["action"]:
             continue
         if chosen["u_rel"] - candidate["u_rel"] < min_utility_gap:
@@ -305,11 +321,33 @@ def _teacher_missing_scores(
 
 def _pair_candidate_valid(candidate: dict[str, Any]) -> bool:
     return (
-        is_valid_candidate(candidate)
-        and bool(required_input_value(candidate))
+        valid_as_rejected(candidate)
+        and (bool(required_input_value(candidate)) or is_empty_answer_rejected_only(candidate))
         and not bool(candidate.get("is_debug_fallback", False))
         and bool(candidate.get("is_student_candidate", True))
     )
+
+
+def _pair_candidate_valid_as_chosen(candidate: dict[str, Any]) -> bool:
+    return valid_as_chosen(candidate) and bool(required_input_value(candidate))
+
+
+def _min_utility_gap_for_record(
+    record: dict[str, Any],
+    chosen_action: str,
+    pair_cfg: dict[str, Any],
+) -> float:
+    default = float(pair_cfg.get("min_utility_gap_default", pair_cfg.get("min_utility_gap", 0.2)))
+    by_dataset = pair_cfg.get("min_utility_gap_by_dataset") or {}
+    by_action = pair_cfg.get("min_utility_gap_by_chosen_action") or {}
+    dataset_gap = by_dataset.get(record.get("dataset"))
+    action_gap = by_action.get(chosen_action)
+    gaps = [default]
+    if dataset_gap is not None:
+        gaps.append(float(dataset_gap))
+    if action_gap is not None:
+        gaps.append(float(action_gap))
+    return min(gaps)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +373,7 @@ def build_step_dpo_pairs(
     show_progress: bool = True,
     require_teacher_label: bool = False,
     require_poe_teacher: bool = False,
+    required_teacher_sources: Iterable[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Build Step-DPO pairs from student top-k candidates ranked by U_rel.
 
@@ -344,7 +383,10 @@ def build_step_dpo_pairs(
     """
     teacher_by_state = _teacher_lookup(teacher_labels)
     pair_cfg = config.get("pair_construction", {})
-    min_utility_gap = float(pair_cfg.get("min_utility_gap", 0.2))
+    allowed_teacher_sources = {str(source) for source in (required_teacher_sources or []) if str(source)}
+    if require_poe_teacher:
+        allowed_teacher_sources.add(str(config.get("teacher", {}).get("source_label", "llm_teacher")))
+    require_teacher_label = require_teacher_label or bool(allowed_teacher_sources)
     require_different_action_types = bool(pair_cfg.get("require_different_action_types", True))
     eval_datasets = set(config["datasets"]["eval"])
 
@@ -382,11 +424,14 @@ def build_step_dpo_pairs(
             except Exception:
                 pass
             continue
-        if require_poe_teacher and (teacher_label is None or teacher_label.get("source") != "poe_teacher"):
+        if allowed_teacher_sources and (
+            teacher_label is None or str(teacher_label.get("source")) not in allowed_teacher_sources
+        ):
             diagnostics.append({
                 **diagnostic_base,
-                "reason": "non_poe_teacher_label",
+                "reason": "teacher_source_not_allowed",
                 "teacher_source": None if teacher_label is None else teacher_label.get("source"),
+                "allowed_teacher_sources": sorted(allowed_teacher_sources),
             })
             counters["dropped"] = len(diagnostics)
             try:
@@ -417,7 +462,7 @@ def build_step_dpo_pairs(
                 "reason": "dropped_invalid_candidate",
                 "dropped": dropped_invalid,
             })
-        if len(candidates) < 2:
+        if len(candidates) < 2 or not any(_pair_candidate_valid_as_chosen(candidate) for candidate in candidates):
             diagnostics.append({
                 **diagnostic_base,
                 "reason": "not_enough_valid_candidates",
@@ -446,7 +491,7 @@ def build_step_dpo_pairs(
 
         scored = _score_candidates(record, teacher_label, config)
         scored = [candidate for candidate in scored if _pair_candidate_valid(candidate)]
-        if len(scored) < 2:
+        if len(scored) < 2 or not any(_pair_candidate_valid_as_chosen(candidate) for candidate in scored):
             diagnostics.append({
                 **diagnostic_base,
                 "reason": "no_valid_pair_after_schema_filter",
@@ -459,6 +504,11 @@ def build_step_dpo_pairs(
                 pass
             continue
 
+        chosen_probe = max(
+            [candidate for candidate in scored if _pair_candidate_valid_as_chosen(candidate)],
+            key=lambda candidate: candidate["u_rel"],
+        )
+        min_utility_gap = _min_utility_gap_for_record(record, chosen_probe["action"], pair_cfg)
         pair = _pick_chosen_rejected(
             scored,
             teacher_label,
@@ -473,6 +523,7 @@ def build_step_dpo_pairs(
                 "n_candidates": len(scored),
                 "actions": [c["action"] for c in scored],
                 "u_rels": [c["u_rel"] for c in scored],
+                "min_utility_gap": min_utility_gap,
             })
             counters["dropped"] = len(diagnostics)
             try:
@@ -509,7 +560,11 @@ def build_step_dpo_pairs(
                 "state_id": state_id,
                 "teacher_source": None if teacher_label is None else teacher_label.get("source"),
                 "chosen_valid_candidate": True,
-                "rejected_valid_candidate": True,
+                "rejected_valid_candidate": bool(is_valid_candidate(rejected_cand)),
+                "rejected_candidate_status": rejected_cand.get("candidate_status"),
+                "rejected_valid_for_chosen": bool(valid_as_chosen(rejected_cand)),
+                "rejected_valid_for_rejected": bool(valid_as_rejected(rejected_cand)),
+                "min_utility_gap": min_utility_gap,
                 "chosen_schema_diagnostics": chosen_cand.get("schema_diagnostics", []),
                 "rejected_schema_diagnostics": rejected_cand.get("schema_diagnostics", []),
                 "active_semantic_tags": record.get("active_semantic_tags", []),

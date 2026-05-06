@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import re
+from collections import Counter
+from typing import Any
+
+
+def _field(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _metadata(item: Any) -> dict[str, Any]:
+    value = _field(item, "metadata", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    text = str(value)
+    match = re.search(r"\d+", text)
+    if match is None:
+        return None
+    return int(match.group(0))
+
+
+def _take_first(examples: list[Any], limit: int | None) -> list[Any]:
+    if limit is None:
+        return list(examples)
+    return list(examples[:limit])
+
+
+def apply_selection_preset(examples: list[Any], preset: str | None) -> list[Any]:
+    if not preset or preset == "none":
+        return list(examples)
+    if preset != "v023_full_rollout":
+        raise ValueError(f"Unknown dataset selection preset: {preset}")
+
+    by_dataset: dict[str, list[Any]] = {}
+    dataset_order: list[str] = []
+    for example in examples:
+        dataset = str(getattr(example, "dataset", ""))
+        if dataset not in by_dataset:
+            by_dataset[dataset] = []
+            dataset_order.append(dataset)
+        by_dataset[dataset].append(example)
+
+    selected_by_dataset: dict[str, list[Any]] = {}
+    for dataset, items in by_dataset.items():
+        if dataset == "gsm8k":
+            selected_by_dataset[dataset] = _take_first(items, 3000)
+        elif dataset == "math":
+            easy_items = [
+                item
+                for item in items
+                if (_as_int(_metadata(item).get("math_level")) or 99) <= 3
+            ]
+            selected_by_dataset[dataset] = _take_first(easy_items, 3000)
+        elif dataset == "or_bench":
+            benign: list[Any] = []
+            hard: list[Any] = []
+            toxic: list[Any] = []
+            other: list[Any] = []
+            for item in items:
+                label = str(_metadata(item).get("or_bench_label", "")).lower()
+                if label == "benign":
+                    benign.append(item)
+                elif label == "hard":
+                    hard.append(item)
+                elif label == "toxic":
+                    toxic.append(item)
+                else:
+                    other.append(item)
+            selected_by_dataset[dataset] = _take_first(benign, 4000) + hard + toxic + other
+        elif dataset in {"mintqa", "in3"}:
+            selected_by_dataset[dataset] = list(items)
+        else:
+            selected_by_dataset[dataset] = list(items)
+
+    selected: list[Any] = []
+    for dataset in dataset_order:
+        selected.extend(selected_by_dataset.get(dataset, []))
+    return selected
+
+
+def selection_summary(examples: list[Any]) -> dict[str, Any]:
+    by_dataset = Counter(str(_field(example, "dataset", "")) for example in examples)
+    by_or_bench_label = Counter(
+        str(_metadata(example).get("or_bench_label", ""))
+        for example in examples
+        if str(_field(example, "dataset", "")) == "or_bench"
+    )
+    math_levels = Counter(
+        str(_metadata(example).get("math_level", "unknown"))
+        for example in examples
+        if str(_field(example, "dataset", "")) == "math"
+    )
+    return {
+        "total": len(examples),
+        "by_dataset": dict(by_dataset),
+        "or_bench_by_label": dict(by_or_bench_label),
+        "math_levels": dict(math_levels),
+    }

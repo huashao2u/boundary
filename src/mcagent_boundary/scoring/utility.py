@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 from mcagent_core.eval.evaluate_answers import is_answer_correct
+from mcagent_boundary.rollout.candidate_schema import is_empty_answer_rejected_only
 from mcagent_boundary.scoring.helpfulness import (
     outcome_helpfulness,
     teacher_helpfulness,
@@ -188,7 +189,9 @@ def utility_rel(
     base_value = float(base_values.get(action, 0.5))
     action_cost = float(cost_map.get(action, 0.0))
 
-    if teacher_label is not None:
+    if is_empty_answer_rejected_only(branch):
+        score = 0.0
+    elif teacher_label is not None:
         score = teacher_helpfulness(branch, teacher_label)
     elif action == "ANSWER":
         score = _auto_answer_score(branch, example)

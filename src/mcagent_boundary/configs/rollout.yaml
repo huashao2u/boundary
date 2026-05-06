@@ -128,8 +128,34 @@ scoring:
 
 pair_construction:
   min_utility_gap: 0.2              # gap between chosen and rejected U_rel
+  min_utility_gap_default: 0.20
+  min_utility_gap_by_dataset:
+    gsm8k: 0.20
+    math: 0.20
+    in3: 0.10
+    mintqa: 0.10
+    or_bench: 0.15
+  min_utility_gap_by_chosen_action:
+    SEARCH: 0.10
+    CLARIFY: 0.10
+    REFUSE: 0.15
+    CALCULATE: 0.20
+    ANSWER: 0.20
   require_different_action_types: true
   truncate_at_action_emission: true  # training pairs end at action emission; no tool obs/finalize
+  balance:
+    dataset_quota:
+      gsm8k: 0.15
+      math: 0.20
+      in3: 0.20
+      mintqa: 0.20
+      or_bench: 0.25
+    chosen_action_quota:
+      ANSWER: 0.25
+      CALCULATE: 0.20
+      SEARCH: 0.20
+      CLARIFY: 0.15
+      REFUSE: 0.20
 
 
 features:
