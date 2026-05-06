@@ -88,6 +88,8 @@ calibration:
     - CALCULATE
 
 scoring:
+  # Legacy compatibility only. v0.2.6 U_rel does not multiply teacher score by
+  # base_value; it uses score - action_cost + semantic_bonus + action_prior.
   base_value:
     ANSWER: 1.0
     SEARCH: 0.6
@@ -99,6 +101,12 @@ scoring:
     CALCULATE: 0.05   # lambda_calc
     CLARIFY: 0.10     # lambda_clar
     ANSWER: 0.0
+    REFUSE: 0.0
+  action_prior:
+    ANSWER: 0.0
+    SEARCH: 0.0
+    CALCULATE: 0.0
+    CLARIFY: 0.0
     REFUSE: 0.0
   # semantic_bonus: only semantic tag keys are allowed here.
   # Process features (STRUGGLE_LONG, LOW_CANDIDATE_LOGPROB_MARGIN, etc.) MUST NOT appear here.

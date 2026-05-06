@@ -78,9 +78,9 @@ def _dynamic_student_examples(allowed_actions: list[str]) -> str:
     "need_external_help": true
   },
   "candidates": [
-    {"rank": 1, "action": "CLARIFY", "confidence": 0.86, "action_input": {"question": "Which city should I search in?"}, "brief_rationale": "The city is necessary for a useful recommendation."},
-    {"rank": 2, "action": "ANSWER", "confidence": 0.25, "action_input": {"answer": "I can suggest general date-night restaurant criteria, but I need the city to recommend a specific place."}, "brief_rationale": "A direct answer is possible only in a generic, less useful form."},
-    {"rank": 3, "action": "REFUSE", "confidence": 0.05, "action_input": {"reason": "The task is underspecified, but clarification is better than refusal."}, "brief_rationale": "Refusal is too strong because the missing information can be clarified."}
+    {"rank": 1, "action": "CLARIFY", "confidence": 0.86, "brief_rationale": "The city is necessary for a useful recommendation.", "action_input": {"question": "Which city should I search in?"}},
+    {"rank": 2, "action": "ANSWER", "confidence": 0.25, "brief_rationale": "A direct answer is possible only in a generic, less useful form.", "action_input": {"answer": "I can suggest general date-night restaurant criteria, but I need the city to recommend a specific place."}},
+    {"rank": 3, "action": "REFUSE", "confidence": 0.05, "brief_rationale": "Refusal is too strong because the missing information can be clarified.", "action_input": {"reason": "The task is underspecified, but clarification is better than refusal."}}
   ]
 }
 ```
@@ -99,9 +99,9 @@ def _dynamic_student_examples(allowed_actions: list[str]) -> str:
     "need_external_help": true
   },
   "candidates": [
-    {"rank": 1, "action": "SEARCH", "confidence": 0.82, "action_input": {"query": "specific entity relation in the question"}, "brief_rationale": "A targeted search is needed for reliable evidence."},
-    {"rank": 2, "action": "ANSWER", "confidence": 0.18, "action_input": {"answer": "I cannot determine the answer reliably from internal knowledge alone."}, "brief_rationale": "A direct answer would be unsupported."},
-    {"rank": 3, "action": "REFUSE", "confidence": 0.12, "action_input": {"reason": "Without external evidence, giving a definitive answer would be unreliable."}, "brief_rationale": "Refusal is possible but search is more helpful if available."}
+    {"rank": 1, "action": "SEARCH", "confidence": 0.82, "brief_rationale": "A targeted search is needed for reliable evidence.", "action_input": {"query": "specific entity relation in the question"}},
+    {"rank": 2, "action": "ANSWER", "confidence": 0.18, "brief_rationale": "A direct answer would be unsupported.", "action_input": {"answer": "I cannot determine the answer reliably from internal knowledge alone."}},
+    {"rank": 3, "action": "REFUSE", "confidence": 0.12, "brief_rationale": "Refusal is possible but search is more helpful if available.", "action_input": {"reason": "Without external evidence, giving a definitive answer would be unreliable."}}
   ]
 }
 ```
@@ -120,8 +120,8 @@ def _dynamic_student_examples(allowed_actions: list[str]) -> str:
     "need_external_help": false
   },
   "candidates": [
-    {"rank": 1, "action": "ANSWER", "confidence": 0.65, "action_input": {"answer": "I can give a safe, high-level response that avoids harmful operational details."}, "brief_rationale": "Benign or safety-framed requests should not be over-refused."},
-    {"rank": 2, "action": "REFUSE", "confidence": 0.35, "action_input": {"reason": "I should refuse if the request asks for harmful instructions or unsafe compliance."}, "brief_rationale": "Refusal is appropriate only when the request crosses a safety boundary."}
+    {"rank": 1, "action": "ANSWER", "confidence": 0.65, "brief_rationale": "Benign or safety-framed requests should not be over-refused.", "action_input": {"answer": "I can give a safe, high-level response that avoids harmful operational details."}},
+    {"rank": 2, "action": "REFUSE", "confidence": 0.35, "brief_rationale": "Refusal is appropriate only when the request crosses a safety boundary.", "action_input": {"reason": "I should refuse if the request asks for harmful instructions or unsafe compliance."}}
   ]
 }
 ```

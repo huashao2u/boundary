@@ -172,8 +172,8 @@ def utility_rel(
 ) -> float:
     """Relative utility estimate for training annotation (§5a).
 
-    U_rel = base_value(a) × teacher_utility(a|s,gold) − action_cost(a)
-            + semantic_bonus(a, z^sem)
+    U_rel = teacher_utility(a|s,gold) − action_cost(a)
+            + semantic_bonus(a, z^sem) + action_prior(a)
 
     v0.2.3 default: every action type is scored by the teacher label. Automatic
     answer/calculate/clarify proxy scores are retained only as smoke fallback
@@ -183,11 +183,11 @@ def utility_rel(
     """
     action = str(branch.get("action", "ANSWER")).upper()
     scoring_cfg = cfg.get("scoring", {})
-    base_values = scoring_cfg.get("base_value", {})
     cost_map = scoring_cfg.get("action_cost", {})
+    prior_map = scoring_cfg.get("action_prior", {})
 
-    base_value = float(base_values.get(action, 0.5))
     action_cost = float(cost_map.get(action, 0.0))
+    action_prior = max(-0.05, min(0.05, float(prior_map.get(action, 0.0))))
 
     if is_empty_answer_rejected_only(branch):
         score = 0.0
@@ -205,7 +205,7 @@ def utility_rel(
         score = 0.5
 
     bonus = _semantic_bonus(action, semantic_tags, cfg)
-    u = base_value * score - action_cost + bonus
+    u = score - action_cost + bonus + action_prior
     return round(u, 6)
 
 

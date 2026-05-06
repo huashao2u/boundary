@@ -15,6 +15,7 @@ paths:
   clear_answer_output: ./artifacts/mining/clear_answer_anchors.jsonl
   clear_external_output: ./artifacts/mining/clear_external_anchors.jsonl
   teacher_label_output: ./artifacts/annotation/teacher_labels.jsonl
+  teacher_self_evidence_label_output: ./artifacts/annotation/teacher_labels_self_evidence.jsonl
   sft_output: ./artifacts/training/warmup_sft.jsonl
   train_pair_output: ./artifacts/training/train_step_dpo_pairs.jsonl
   eval_pair_output: ./artifacts/training/eval_step_dpo_pairs.jsonl

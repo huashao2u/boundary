@@ -11,7 +11,12 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from mcagent_boundary.config import load_boundary_config, resolve_repo_path
 from mcagent_boundary.io import write_json, write_jsonl
 from mcagent_boundary.progress import make_progress
-from mcagent_boundary.rollout.dataset_selection import apply_selection_preset, selection_summary
+from mcagent_boundary.rollout.dataset_selection import (
+    apply_selection_preset,
+    filter_by_example_ids,
+    load_fixed_example_ids,
+    selection_summary,
+)
 from mcagent_boundary.rollout.generate_rollouts import load_standardized_examples
 
 
@@ -29,10 +34,17 @@ def main() -> None:
         choices=["none", "v023_full_rollout"],
         help="Apply a named post-load dataset selection plan.",
     )
+    parser.add_argument(
+        "--fixed-example-ids",
+        type=str,
+        default=None,
+        help="Optional txt/JSON/JSONL file of example_id values for fixed small experiments.",
+    )
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
 
     config = load_boundary_config()
+    fixed_example_ids = load_fixed_example_ids(args.fixed_example_ids) if args.fixed_example_ids else set()
     adapter_cache_dir = resolve_repo_path(config["paths"]["adapter_cache_dir"], config)
     adapter_cache_dir.mkdir(parents=True, exist_ok=True)
     summary: dict[str, dict] = {}
@@ -57,6 +69,7 @@ def main() -> None:
             show_progress=not args.no_progress,
         )
         examples = apply_selection_preset(examples, args.selection_preset)
+        examples = filter_by_example_ids(examples, fixed_example_ids)
         dataset_iter = make_progress(
             datasets,
             total=len(datasets),

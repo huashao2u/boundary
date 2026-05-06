@@ -47,6 +47,15 @@ def main() -> None:
         metavar="SOURCE",
         help="Allowed teacher label source. May be passed multiple times.",
     )
+    parser.add_argument(
+        "--teacher-label-file",
+        type=str,
+        default=None,
+        help=(
+            "Override teacher label JSONL. Relative paths are resolved under --input-dir "
+            "when provided, otherwise under the repo root."
+        ),
+    )
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
 
@@ -67,7 +76,14 @@ def main() -> None:
     boundary_records = read_jsonl(_in("boundary_candidates_output"))
     clear_answer = read_jsonl(_in("clear_answer_output"))
     clear_external = read_jsonl(_in("clear_external_output"))
-    teacher_labels = read_jsonl(_in("teacher_label_output"))
+    if args.teacher_label_file:
+        teacher_label_path = Path(args.teacher_label_file)
+        if not teacher_label_path.is_absolute():
+            teacher_label_path = Path(args.input_dir or ".") / teacher_label_path
+        teacher_labels = read_jsonl(teacher_label_path)
+    else:
+        teacher_label_path = _in("teacher_label_output")
+        teacher_labels = read_jsonl(teacher_label_path)
     selected_records = boundary_records + clear_answer + clear_external
     configured_teacher_source = str(config.get("teacher", {}).get("source_label", "llm_teacher"))
     required_teacher_sources = set(args.require_teacher_source or [])
@@ -101,6 +117,7 @@ def main() -> None:
         "diagnostic_reasons": diagnostic_reasons,
         "train_output": str(train_path),
         "eval_output": str(eval_path),
+        "teacher_label_file": str(teacher_label_path),
         "required_teacher_sources": sorted(required_teacher_sources),
         "train_by_dataset": train_by_dataset,
         "eval_by_dataset": eval_by_dataset,

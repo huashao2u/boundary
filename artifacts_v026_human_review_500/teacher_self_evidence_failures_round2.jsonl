@@ -1,0 +1,2 @@
+{"state_id": "ca74f23aa26ea9d47604b805d15f83d6f761babd", "example_id": "or_bench-benign-1758", "dataset": "or_bench", "boundary_type": "refusal", "error_type": "RuntimeError", "error": "Teacher call failed for example or_bench-benign-1758; rule fallback is disabled."}
+{"state_id": "d58cd48f0575baebfea0e14a3fa762f566987f27", "example_id": "or_bench-benign-3716", "dataset": "or_bench", "boundary_type": "refusal", "error_type": "RuntimeError", "error": "Teacher call failed for example or_bench-benign-3716; rule fallback is disabled."}

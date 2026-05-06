@@ -10,6 +10,11 @@ import time
 from typing import Any, Callable
 
 from mcagent_boundary.annotation.openai_compatible_client import OpenAICompatibleChatClient
+from mcagent_boundary.annotation.validate_teacher_evidence import (
+    apply_evidence_score_guardrail,
+    attach_auto_evidence_to_candidates,
+    build_auto_candidate_evidence,
+)
 from mcagent_boundary.rollout.candidate_schema import is_valid_candidate, valid_as_rejected
 
 
@@ -106,6 +111,67 @@ def _rule_fallback_candidate_helpfulness(
     return result
 
 
+def _rule_fallback_candidate_evidence(
+    candidates: list[dict[str, Any]],
+    record: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Best-effort evidence for rule fallback / smoke paths."""
+    record = record or {}
+    evidence_items = []
+    for candidate in candidates:
+        action = str(candidate.get("action", "")).upper()
+        action_input = candidate.get("canonical_action_input") or candidate.get("action_input") or {}
+        auto_evidence = build_auto_candidate_evidence(
+            candidate,
+            gold_answer=record.get("gold_answer"),
+            dataset=str(record.get("dataset", "")),
+        )
+        evidence = {
+            "rank": candidate.get("rank"),
+            "action": action,
+            "evidence_summary": "Rule fallback evidence; use only for smoke/debug labels.",
+            **auto_evidence,
+        }
+        if action == "ANSWER":
+            answer = str(action_input.get("answer", ""))
+            evidence.update({
+                "payload_answer": answer,
+                "rationale_answer": "",
+                "payload_answer_type": "empty" if not answer.strip() else "unknown",
+                "payload_answer_correct": auto_evidence.get("auto_payload_answer_correct"),
+                "rationale_answer_correct": None,
+                "payload_rationale_conflict": False,
+            })
+        elif action == "CALCULATE":
+            evidence.update({
+                "expression": str(action_input.get("expression", "")),
+                "expression_relevance": "direct_final"
+                if auto_evidence.get("auto_expression_matches_gold")
+                else "unknown",
+                "expression_matches_gold": auto_evidence.get("auto_expression_matches_gold"),
+            })
+        elif action == "SEARCH":
+            evidence["query_specific_and_relevant"] = None
+        elif action == "CLARIFY":
+            evidence["targets_critical_slot"] = None
+        elif action == "REFUSE":
+            evidence["should_refuse"] = (record.get("metadata") or {}).get("should_refuse")
+        evidence_items.append(evidence)
+    return evidence_items
+
+
+def _rule_fallback_candidate_reflection(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "rank": candidate.get("rank"),
+            "action": str(candidate.get("action", "")).upper(),
+            "reflection": str(candidate.get("brief_rationale") or "").strip()
+            or f"I considered {str(candidate.get('action', 'ACTION')).upper()} under the current uncertainty.",
+        }
+        for candidate in candidates
+    ]
+
+
 def _best_action_from_tags(active_tags: set[str], candidates: list[dict[str, Any]]) -> str:
     """Pick best action from semantic tags, restricted to candidate actions."""
     candidate_actions = {str(c.get("action", "")).upper() for c in candidates}
@@ -138,6 +204,7 @@ def _validate_teacher_payload(
     candidates: list[dict[str, Any]],
     *,
     allow_score_fallback: bool = True,
+    record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     semantic_tags = payload.get("semantic_tags")
     if not isinstance(semantic_tags, list):
@@ -220,6 +287,106 @@ def _validate_teacher_payload(
             }
         candidate_helpfulness.append(entry)
 
+    raw_evidence = payload.get("candidate_evidence") or []
+    evidence_by_key: dict[tuple[int | None, str], dict[str, Any]] = {}
+    unmatched_evidence_by_action: dict[str, list[dict[str, Any]]] = {}
+    if isinstance(raw_evidence, list) and raw_evidence:
+        for entry in raw_evidence:
+            if not isinstance(entry, dict):
+                continue
+            action = str(entry.get("action", "")).upper()
+            if action not in ACTION_SET:
+                continue
+            rank = entry.get("rank")
+            try:
+                rank = None if rank is None else int(rank)
+            except (TypeError, ValueError):
+                rank = None
+            normalized = {
+                **entry,
+                "rank": rank,
+                "action": action,
+                "evidence_summary": str(entry.get("evidence_summary", "")).strip()[:240],
+            }
+            if rank is None:
+                unmatched_evidence_by_action.setdefault(action, []).append(normalized)
+            else:
+                evidence_by_key[(rank, action)] = normalized
+
+    fallback_evidence = {
+        (entry.get("rank"), entry["action"]): entry
+        for entry in _rule_fallback_candidate_evidence(candidates, record)
+    }
+    candidate_evidence: list[dict[str, Any]] = []
+    for candidate in candidates:
+        action = str(candidate.get("action", "")).upper()
+        rank_raw = candidate.get("rank")
+        try:
+            rank = None if rank_raw is None else int(rank_raw)
+        except (TypeError, ValueError):
+            rank = None
+        key = (rank, action)
+        entry = evidence_by_key.get(key)
+        if entry is None and unmatched_evidence_by_action.get(action):
+            entry = unmatched_evidence_by_action[action].pop(0)
+            entry = {**entry, "rank": rank}
+        if entry is None:
+            if not allow_score_fallback:
+                raise ValueError(f"teacher_missing_candidate_evidence rank={rank} action={action}")
+            entry = fallback_evidence.get(key) or {"rank": rank, "action": action, "evidence_summary": ""}
+        candidate_evidence.append(entry)
+
+    raw_reflection = payload.get("candidate_reflection") or []
+    reflection_by_key: dict[tuple[int | None, str], dict[str, Any]] = {}
+    unmatched_reflection_by_action: dict[str, list[dict[str, Any]]] = {}
+    if isinstance(raw_reflection, list) and raw_reflection:
+        for entry in raw_reflection:
+            if not isinstance(entry, dict):
+                continue
+            action = str(entry.get("action", "")).upper()
+            if action not in ACTION_SET:
+                continue
+            rank = entry.get("rank")
+            try:
+                rank = None if rank is None else int(rank)
+            except (TypeError, ValueError):
+                rank = None
+            normalized = {
+                "rank": rank,
+                "action": action,
+                "reflection": str(entry.get("reflection", "")).strip()[:240],
+            }
+            if rank is None:
+                unmatched_reflection_by_action.setdefault(action, []).append(normalized)
+            else:
+                reflection_by_key[(rank, action)] = normalized
+    fallback_reflection = {
+        (entry.get("rank"), entry["action"]): entry
+        for entry in _rule_fallback_candidate_reflection(candidates)
+    }
+    candidate_reflection: list[dict[str, Any]] = []
+    for candidate in candidates:
+        action = str(candidate.get("action", "")).upper()
+        rank_raw = candidate.get("rank")
+        try:
+            rank = None if rank_raw is None else int(rank_raw)
+        except (TypeError, ValueError):
+            rank = None
+        key = (rank, action)
+        entry = reflection_by_key.get(key)
+        if entry is None and unmatched_reflection_by_action.get(action):
+            entry = unmatched_reflection_by_action[action].pop(0)
+            entry = {**entry, "rank": rank}
+        if entry is None:
+            entry = fallback_reflection.get(key) or {
+                "rank": rank,
+                "action": action,
+                "reflection": f"I considered {action} under the current uncertainty.",
+            }
+        if not entry.get("reflection"):
+            entry["reflection"] = f"I considered {action} under the current uncertainty."
+        candidate_reflection.append(entry)
+
     # preferred_over validation
     raw_preferred = payload.get("preferred_over") or []
     preferred_over = [str(a).upper() for a in raw_preferred if str(a).upper() in candidate_actions]
@@ -233,10 +400,12 @@ def _validate_teacher_payload(
     return {
         "semantic_tags": [str(tag) for tag in semantic_tags],
         "meta_reflection": meta_reflection,
+        "candidate_evidence": candidate_evidence,
         "recommended_action": recommended_action,
         "rationale": rationale,
         "candidate_utility": candidate_helpfulness,
         "candidate_helpfulness": candidate_helpfulness,
+        "candidate_reflection": candidate_reflection,
         "preferred_over": preferred_over,
         "rubric_degenerate": rubric_degenerate,
     }
@@ -265,10 +434,12 @@ def _fallback_label(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "semantic_tags": tags,
         "meta_reflection": f"I should choose {best_action} because it best matches the current uncertainty.",
+        "candidate_evidence": _rule_fallback_candidate_evidence(candidates, record),
         "recommended_action": best_action,
         "rationale": f"The highest local utility branch for this state is {best_action}.",
         "candidate_utility": candidate_helpfulness,
         "candidate_helpfulness": candidate_helpfulness,
+        "candidate_reflection": _rule_fallback_candidate_reflection(candidates),
         "preferred_over": preferred_over,
         "rubric_degenerate": False,
     }
@@ -329,6 +500,11 @@ def _label_one_record(
         }
         for i, c in enumerate(candidates)
     ]
+    student_candidates_for_prompt = attach_auto_evidence_to_candidates(
+        student_candidates_for_prompt,
+        gold_answer=record.get("gold_answer"),
+        dataset=str(record.get("dataset", "")),
+    )
 
     dataset_boundary = json.dumps(
         {
@@ -386,6 +562,12 @@ def _label_one_record(
                         fallback_action=fallback["recommended_action"],
                         candidates=candidates,
                         allow_score_fallback=allow_rule_fallback,
+                        record=record,
+                    )
+                    payload = apply_evidence_score_guardrail(
+                        payload,
+                        dataset=str(record.get("dataset", "")),
+                        record=record,
                     )
                     break
                 except Exception as validation_exc:
@@ -406,8 +588,9 @@ def _label_one_record(
                         "Previous invalid response:\n"
                         f"{json.dumps(raw, ensure_ascii=False)}\n"
                         "Return the full JSON object with semantic_tags, meta_reflection, "
-                        "candidate_utility, candidate_helpfulness, recommended_action, rationale, "
-                        "preferred_over, and rubric_degenerate."
+                        "candidate_evidence, candidate_utility, candidate_helpfulness, "
+                        "candidate_reflection, recommended_action, rationale, preferred_over, "
+                        "and rubric_degenerate."
                     )
             source = client.source_label
             counter_key = "success"
@@ -424,8 +607,20 @@ def _label_one_record(
                 **fallback,
                 "rationale": f"{fallback['rationale']} Teacher call failed: {exc}",
             }
+            payload = apply_evidence_score_guardrail(
+                payload,
+                dataset=str(record.get("dataset", "")),
+                record=record,
+            )
             source = "rule_fallback_after_failure"
             counter_key = "failure"
+
+    if "guardrail_summary" not in payload:
+        payload = apply_evidence_score_guardrail(
+            payload,
+            dataset=str(record.get("dataset", "")),
+            record=record,
+        )
 
     return (
         {

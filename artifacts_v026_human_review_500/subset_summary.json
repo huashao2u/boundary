@@ -1,0 +1,58 @@
+{
+  "source_artifacts": "artifacts_v023_full_20260430T153529Z",
+  "review_file": "artifacts_v023_full_20260430T153529Z/human_review/label_studio_pair_review_100_per_dataset.jsonl",
+  "num_review_records": 500,
+  "num_unique_state_ids": 500,
+  "files": {
+    "all_rollouts.jsonl": {
+      "count": 500,
+      "by_dataset": {
+        "gsm8k": 100,
+        "math": 100,
+        "in3": 100,
+        "mintqa": 100,
+        "or_bench": 100
+      },
+      "by_pool": {
+        "": 500
+      }
+    },
+    "boundary_candidates.jsonl": {
+      "count": 413,
+      "by_dataset": {
+        "gsm8k": 100,
+        "math": 98,
+        "in3": 99,
+        "mintqa": 99,
+        "or_bench": 17
+      },
+      "by_pool": {
+        "boundary_critical": 413
+      }
+    },
+    "clear_answer_anchors.jsonl": {
+      "count": 77,
+      "by_dataset": {
+        "math": 2,
+        "or_bench": 75
+      },
+      "by_pool": {
+        "clear_answer_anchor": 77
+      }
+    },
+    "clear_external_anchors.jsonl": {
+      "count": 10,
+      "by_dataset": {
+        "in3": 1,
+        "mintqa": 1,
+        "or_bench": 8
+      },
+      "by_pool": {
+        "clear_external_anchor": 10
+      }
+    }
+  },
+  "num_found_in_mining_or_anchors": 500,
+  "num_missing_from_mining_or_anchors": 0,
+  "missing_state_ids": []
+}

@@ -10,7 +10,7 @@ from mcagent_core.rollout.policy import _model_assets_available, build_policy
 from mcagent_boundary.adapters import build_adapter_registry
 from mcagent_boundary.progress import make_progress
 from mcagent_boundary.rollout.branch_actions import rollout_one_example
-from mcagent_boundary.rollout.dataset_selection import apply_selection_preset
+from mcagent_boundary.rollout.dataset_selection import apply_selection_preset, filter_by_example_ids
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,7 @@ def generate_rollouts(
     phase: str,
     limit_per_dataset: int | None = None,
     selection_preset: str | None = None,
+    fixed_example_ids: set[str] | None = None,
     show_progress: bool = True,
 ) -> list[dict]:
     examples = load_standardized_examples(
@@ -106,6 +107,7 @@ def generate_rollouts(
         show_progress=show_progress,
     )
     examples = apply_selection_preset(examples, selection_preset)
+    examples = filter_by_example_ids(examples, fixed_example_ids or set())
     model_path = str(_resolve_model_path(config))
     backend = _resolve_backend(
         str(config["rollout"]["backend"]),

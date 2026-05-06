@@ -185,7 +185,25 @@ def canonicalize_candidate(candidate: dict[str, Any], *, rank: int | None = None
     normalized["schema_diagnostics"] = schema_diagnostics
     normalized["is_student_candidate"] = bool(candidate.get("is_student_candidate", True))
     normalized["is_debug_fallback"] = bool(candidate.get("is_debug_fallback", False))
-    return normalized
+    preferred_order = [
+        "rank",
+        "action",
+        "confidence",
+        "brief_rationale",
+        "action_input",
+        "raw_action_input",
+        "canonical_action_input",
+        "valid_candidate",
+        "candidate_status",
+        "valid_for_chosen",
+        "valid_for_rejected",
+        "schema_diagnostics",
+        "is_student_candidate",
+        "is_debug_fallback",
+    ]
+    ordered = {key: normalized[key] for key in preferred_order if key in normalized}
+    ordered.update({key: value for key, value in normalized.items() if key not in ordered})
+    return ordered
 
 
 def canonicalize_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

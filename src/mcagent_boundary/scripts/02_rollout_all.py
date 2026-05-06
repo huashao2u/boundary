@@ -10,7 +10,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from mcagent_boundary.config import load_boundary_config, resolve_repo_path
 from mcagent_boundary.io import write_jsonl, write_jsonl_by_dataset
-from mcagent_boundary.rollout.dataset_selection import selection_summary
+from mcagent_boundary.rollout.dataset_selection import load_fixed_example_ids, selection_summary
 from mcagent_boundary.rollout.generate_rollouts import generate_rollouts
 
 
@@ -46,6 +46,12 @@ def main() -> None:
         choices=["none", "v023_full_rollout"],
         help="Apply a named post-load dataset selection plan.",
     )
+    parser.add_argument(
+        "--fixed-example-ids",
+        type=str,
+        default=None,
+        help="Optional txt/JSON/JSONL file of example_id values for fixed small experiments.",
+    )
     parser.add_argument("--output-dir", type=str, default=None, help="Override output directory for all artifacts.")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
     args = parser.parse_args()
@@ -61,6 +67,7 @@ def main() -> None:
         else list(config["datasets"]["train"])
     )
 
+    fixed_example_ids = load_fixed_example_ids(args.fixed_example_ids) if args.fixed_example_ids else set()
     rollouts = generate_rollouts(
         config,
         dataset_names=dataset_names,
@@ -71,6 +78,7 @@ def main() -> None:
             else args.limit_per_dataset if args.limit_per_dataset is not None else config["rollout"]["limit_per_dataset"]
         ),
         selection_preset=args.selection_preset,
+        fixed_example_ids=fixed_example_ids,
         show_progress=not args.no_progress,
     )
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 
@@ -34,6 +36,36 @@ def _take_first(examples: list[Any], limit: int | None) -> list[Any]:
     if limit is None:
         return list(examples)
     return list(examples[:limit])
+
+
+def load_fixed_example_ids(path: str | Path) -> set[str]:
+    """Load fixed example ids from txt, JSON list, or JSONL records."""
+    input_path = Path(path)
+    text = input_path.read_text(encoding="utf-8").strip()
+    if not text:
+        return set()
+    if text.startswith("["):
+        payload = json.loads(text)
+        return {str(item) for item in payload}
+    ids: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("{"):
+            payload = json.loads(stripped)
+            value = payload.get("example_id") or payload.get("id")
+        else:
+            value = stripped.split()[0]
+        if value:
+            ids.add(str(value))
+    return ids
+
+
+def filter_by_example_ids(examples: list[Any], example_ids: set[str]) -> list[Any]:
+    if not example_ids:
+        return list(examples)
+    return [example for example in examples if str(_field(example, "example_id", "")) in example_ids]
 
 
 def apply_selection_preset(examples: list[Any], preset: str | None) -> list[Any]:

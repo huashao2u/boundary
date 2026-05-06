@@ -2,7 +2,11 @@ artifacts/
 artifacts_v02*/
 outputs/
 dataset/
+dataset
 models
 configs/default.local.yaml
+.venvs/
+.label_studio_data/
+.label_studio_data*/
 __pycache__/
 *.pyc

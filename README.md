@@ -50,8 +50,14 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
   --include-clear-answer \
   --strict-teacher
 
+# 3b. 可选但推荐：从已有 rollout/mining 重新做 self-evidence teacher relabel
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evidence.py \
+  --include-clear-answer \
+  --strict-teacher
+
 # 4. 严格 pair 构建；只保留配置中的真实 LLM teacher 标注
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
+  --teacher-label-file teacher_labels_self_evidence.jsonl \
   --require-configured-teacher-source
 
 # 4b. 可选但推荐：按数据集来源与 chosen action 对训练 pair 做下采样平衡
@@ -83,9 +89,16 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
   --include-clear-answer \
   --strict-teacher
 
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evidence.py \
+  --input-dir "$RUN_DIR" \
+  --output-dir "$RUN_DIR" \
+  --include-clear-answer \
+  --strict-teacher
+
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
   --input-dir "$RUN_DIR" \
   --output-dir "$RUN_DIR" \
+  --teacher-label-file teacher_labels_self_evidence.jsonl \
   --require-configured-teacher-source
 
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/04b_balance_pairs.py \
@@ -109,6 +122,7 @@ pair，需要先把对应 JSONL 放回配置路径，或临时修改 `paths.yaml
 参数：
 
 - `--limit-per-dataset N`：每个数据集最多读取 N 条；不传则使用 `rollout.limit_per_dataset`。
+- `--fixed-example-ids PATH`：只物化固定 `example_id` 列表，便于人工 review 样本复现实验。
 - `--no-progress`：关闭进度条。
 
 示例：
@@ -133,6 +147,8 @@ process uncertainty 诊断信号。boundary / anchor 挖掘已拆到 `02b_mine_b
 - `--limit-per-dataset N`：每个数据集最多 rollout N 条。
 - `--full-dataset`：忽略 `rollout.limit_per_dataset`，读取全量。
 - `--selection-preset {none,v023_full_rollout}`：应用命名采样方案。
+- `--fixed-example-ids PATH`：只对固定 `example_id` 列表执行小规模实验；支持一行一个 id、
+  JSON list，或含 `example_id` 字段的 JSONL。
 - `--output-dir DIR`：把 rollout JSONL 写入指定目录。
 - `--no-progress`：关闭进度条。
 
@@ -147,6 +163,16 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
   --datasets gsm8k,math,in3,mintqa,or_bench \
   --limit-per-dataset 50 \
   --output-dir artifacts_v02_vllm_200_strict
+```
+
+固定样本小实验示例：
+
+```bash
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
+  --backend vllm \
+  --datasets gsm8k,math,in3,mintqa,or_bench \
+  --fixed-example-ids configs/fixed_review_ids.txt \
+  --output-dir artifacts_v026_fixed
 ```
 
 ### `02b_mine_boundary.py`
@@ -178,9 +204,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/02b_mine_boundary.py \
 ### `03_teacher_label_boundary.py`
 
 功能：读取 `boundary_candidates` 和 anchor records，调用 OpenAI-compatible teacher 评估每个
-student candidate 的 helpfulness，写出 `teacher_labels.jsonl`。成功标签的 `source` 来自
-`teacher.source_label`，默认是 `llm_teacher`；标签中同时记录 `teacher_provider` 与
-`teacher_model`，便于追踪实验来源。
+student candidate 的 helpfulness，写出 `teacher_labels.jsonl`。v0.2.6 teacher prompt 要求先输出
+`candidate_evidence`，再输出 `candidate_utility`，并会对 evidence/score 明显矛盾的情况写入
+guardrail diagnostics。成功标签的 `source` 来自 `teacher.source_label`，默认是 `llm_teacher`；
+标签中同时记录 `teacher_provider` 与 `teacher_model`，便于追踪实验来源。
 
 参数：
 
@@ -213,15 +240,51 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
   --teacher-rpm-limit 240
 ```
 
+### `03b_relabel_teacher_self_evidence.py`
+
+功能：不重跑 student rollout，从已有 `boundary_candidates.jsonl`、`clear_answer_anchors.jsonl`
+和 `clear_external_anchors.jsonl` 重新调用 self-evidence teacher，写出
+`teacher_labels_self_evidence.jsonl`、`teacher_self_evidence_failures.jsonl` 和
+`relabel_report.json`。该脚本默认用于严格 relabel；`--allow-rule-fallback` 只建议 smoke/debug。
+
+输出 label 会保留 `candidate_evidence`、`candidate_reflection`、guardrailed 后的
+`candidate_utility`，并在每个 utility entry 中记录 `original_score`、`guardrailed_score`、
+`guardrail_applied` 和 `guardrail_reasons`。数学数据集会强制 payload-first caps/floors，
+例如 wrong ANSWER payload 最高 0.2、direct-final CALCULATE 至少 0.8。
+
+参数：
+
+- `--input-dir DIR`：从指定目录读取 mining/anchor JSONL。
+- `--output-dir DIR`：把 self-evidence label 与 report 写入指定目录。
+- `--include-clear-answer`：同时 relabel clear-answer anchors。
+- `--resume-existing`：复用已有 `teacher_labels_self_evidence.jsonl`，只补缺失 state。
+- `--teacher-workers N`、`--teacher-rpm-limit N`、`--checkpoint-flush-every N`：同 `03`。
+- `--skip-failed-teacher`：失败落盘并继续。
+
+示例：
+
+```bash
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evidence.py \
+  --input-dir artifacts_v023_full_20260430T153529Z \
+  --output-dir artifacts_v023_full_20260430T153529Z \
+  --include-clear-answer \
+  --resume-existing \
+  --teacher-workers 4 \
+  --teacher-rpm-limit 240
+```
+
 ### `04_make_pairs.py`
 
 功能：读取 boundary/anchor records 与 teacher labels，构造 Step-DPO chosen/rejected pairs。
 当前逻辑只从 student rollout candidates 中选 pair：
 
-- chosen：`U_rel` 最高，且 teacher rubric 不退化。
+- chosen：`U_rel` 最高，且 teacher rubric 不退化。v0.2.6 的 `U_rel` 为
+  `teacher_score - action_cost + semantic_bonus + action_prior`，不再使用 `base_value * teacher_score`。
 - rejected：不同 action type，且 utility gap 不低于配置中的默认/数据集/action 动态阈值。
 - schema 无效、debug fallback、非允许 teacher source 标签会被过滤；空 `ANSWER` 只能作为 rejected-only
   负例进入 pair，不能作为 chosen。空 `SEARCH` / `CLARIFY` / `CALCULATE` 仍会被过滤。
+- completion reflection 优先使用 teacher 的 `candidate_reflection`，避免在 rejected completion 中写入
+  `lower utility` / `rejected` / `worse` 等显式负面 marker。
 - 聚合 pair 之外，会额外写 `by_dataset/<dataset>/train_step_dpo_pairs.jsonl` 和
   `by_dataset/<dataset>/eval_step_dpo_pairs.jsonl`。
 
@@ -235,6 +298,8 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 - `--require-teacher-source SOURCE`：显式指定允许的 teacher source，可传多次。
 - `--require-poe-teacher`：兼容旧命令的别名，当前按 `teacher.source_label` 过滤；如需旧数据中的
   `poe_teacher`，请使用 `--require-teacher-source poe_teacher`。
+- `--teacher-label-file PATH`：覆盖 teacher label JSONL；相对路径在设置了 `--input-dir` 时相对该目录解析。
+  例如 relabel 后可传 `--teacher-label-file teacher_labels_self_evidence.jsonl`。
 - `--no-progress`：关闭进度条。
 
 示例：
@@ -243,6 +308,7 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
   --input-dir artifacts_v02_vllm_200_strict \
   --output-dir artifacts_v02_vllm_200_strict \
+  --teacher-label-file teacher_labels_self_evidence.jsonl \
   --require-configured-teacher-source
 ```
 

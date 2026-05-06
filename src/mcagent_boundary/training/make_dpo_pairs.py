@@ -7,15 +7,9 @@ from __future__ import annotations
 # gap >= min_utility_gap (0.2). Message format: prompt_messages/chosen_messages/rejected_messages.
 # See §pair_construction in rollout.yaml.
 #
-# TODO(boundary): produce a *per-branch* teacher reflection so the rejected
-# completion's reasoning text is also teacher-generated. Current interim
-# behavior: `chosen` uses the teacher's single meta_reflection; `rejected`
-# uses a deterministic rejected-role line so chosen/rejected pairs are not
-# textually identical. The rejected action itself still comes only from
-# student-proposed candidates. See CLAUDE.md §Change 4.
-
 import json
 import logging
+import re
 from hashlib import sha1
 from typing import Any, Iterable, Literal
 
@@ -41,6 +35,12 @@ _EXCLUDED_ROLLOUT_ISSUES = {
     "invalid_candidate_output",
     "legacy_single_decision_fallback",
     "invalid_schema",
+}
+_REFLECTION_MARKER_REPLACEMENTS = {
+    "lower utility": "less suitable",
+    "rejected": "non-selected",
+    "worse": "less suitable",
+    "alternative despite": "another possible choice given",
 }
 
 
@@ -85,17 +85,75 @@ def _reflection_for_role(
     teacher_label: dict[str, Any] | None,
     role_label: Literal["chosen", "rejected"],
 ) -> str:
+    rank = branch.get("rank")
+    try:
+        rank = None if rank is None else int(rank)
+    except (TypeError, ValueError):
+        rank = None
+    action = str(branch.get("action", "")).upper()
+    if teacher_label is not None:
+        for entry in teacher_label.get("candidate_reflection") or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_action = str(entry.get("action", "")).upper()
+            entry_rank = entry.get("rank")
+            try:
+                entry_rank = None if entry_rank is None else int(entry_rank)
+            except (TypeError, ValueError):
+                entry_rank = None
+            if entry_action == action and (rank is None or entry_rank == rank):
+                reflection = str(entry.get("reflection", "")).strip()
+                if reflection:
+                    return _sanitize_reflection(reflection)
     if role_label == "chosen":
         if teacher_label is not None and teacher_label.get("meta_reflection"):
-            return str(teacher_label["meta_reflection"])
+            return _sanitize_reflection(str(teacher_label["meta_reflection"]))
         return f"I should prefer {branch['action']} under the current evidence and uncertainty."
-    # rejected role — intentionally NOT the teacher's meta_reflection so that
-    # chosen and rejected completions differ in surrounding text as well as the
-    # final JSON action payload. See CLAUDE.md §Change 4.
-    return (
-        f"Alternative choice: picking {branch['action']} despite its lower local "
-        f"utility under this boundary state."
+    return _sanitize_reflection(str(branch.get("brief_rationale") or "").strip()) or (
+        f"I considered {branch['action']} under the current uncertainty."
     )
+
+
+def _sanitize_reflection(text: str) -> str:
+    cleaned = str(text or "").strip()
+    lowered = cleaned.lower()
+    for marker, replacement in _REFLECTION_MARKER_REPLACEMENTS.items():
+        if marker in lowered:
+            cleaned = re.sub(re.escape(marker), replacement, cleaned, flags=re.IGNORECASE)
+            lowered = cleaned.lower()
+    return cleaned
+
+
+def _candidate_teacher_entry(
+    teacher_label: dict[str, Any] | None,
+    branch: dict[str, Any],
+    *,
+    field: str,
+) -> dict[str, Any] | None:
+    if teacher_label is None:
+        return None
+    rank = branch.get("rank")
+    try:
+        rank = None if rank is None else int(rank)
+    except (TypeError, ValueError):
+        rank = None
+    action = str(branch.get("action", "")).upper()
+    fallback = None
+    for entry in teacher_label.get(field) or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("action", "")).upper() != action:
+            continue
+        entry_rank = entry.get("rank")
+        try:
+            entry_rank = None if entry_rank is None else int(entry_rank)
+        except (TypeError, ValueError):
+            entry_rank = None
+        if rank is not None and entry_rank == rank:
+            return entry
+        if fallback is None:
+            fallback = entry
+    return fallback
 
 
 def _build_completion_messages(
@@ -570,6 +628,19 @@ def build_step_dpo_pairs(
                 "active_semantic_tags": record.get("active_semantic_tags", []),
                 "semantic_tag_evidence": record.get("semantic_tag_evidence", {}),
                 "process_features": record.get("process_features", {}),
+                "teacher_guardrail_summary": None
+                if teacher_label is None
+                else teacher_label.get("guardrail_summary", {}),
+                "chosen_candidate_evidence": _candidate_teacher_entry(
+                    teacher_label,
+                    chosen_cand,
+                    field="candidate_evidence",
+                ),
+                "rejected_candidate_evidence": _candidate_teacher_entry(
+                    teacher_label,
+                    rejected_cand,
+                    field="candidate_evidence",
+                ),
             },
         }
         if _assign_split(record, eval_datasets) == "eval":

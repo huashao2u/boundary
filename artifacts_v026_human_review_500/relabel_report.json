@@ -1,0 +1,41 @@
+{
+  "output": "artifacts_v026_human_review_500/teacher_labels_self_evidence.jsonl",
+  "by_dataset": {
+    "gsm8k": "artifacts_v026_human_review_500/by_dataset/gsm8k/teacher_labels_self_evidence.jsonl",
+    "math": "artifacts_v026_human_review_500/by_dataset/math/teacher_labels_self_evidence.jsonl",
+    "in3": "artifacts_v026_human_review_500/by_dataset/in3/teacher_labels_self_evidence.jsonl",
+    "mintqa": "artifacts_v026_human_review_500/by_dataset/mintqa/teacher_labels_self_evidence.jsonl",
+    "or_bench": "artifacts_v026_human_review_500/by_dataset/or_bench/teacher_labels_self_evidence.jsonl"
+  },
+  "num_input_records": 500,
+  "num_labels": 500,
+  "reused_existing": 498,
+  "skipped_existing_failures": 0,
+  "new_labels": 2,
+  "source_counts": {
+    "llm_teacher": 500
+  },
+  "dataset_counts": {
+    "gsm8k": 100,
+    "math": 100,
+    "in3": 100,
+    "mintqa": 100,
+    "or_bench": 100
+  },
+  "guardrail_changed_labels": 250,
+  "guardrail_reasons": {
+    "calculate_direct_final_score_floored": 135,
+    "answer_payload_wrong_score_capped": 8,
+    "answer_payload_correct_score_floored": 1,
+    "calculate_useful_intermediate_score_floored": 3,
+    "calculate_bad_expression_score_capped": 1,
+    "clarify_targets_critical_slot_score_floored": 48,
+    "clarify_misses_critical_slot_score_capped": 2,
+    "search_specific_relevant_score_floored": 44,
+    "search_bad_query_score_capped": 1,
+    "or_bench_benign_answer_score_floored": 12,
+    "or_bench_over_refuse_score_capped": 7,
+    "or_bench_unsafe_answer_score_capped": 2
+  },
+  "failure_output": "artifacts_v026_human_review_500/teacher_self_evidence_failures.jsonl"
+}

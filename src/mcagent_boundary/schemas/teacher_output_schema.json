@@ -3,6 +3,9 @@
   "required": [
     "semantic_tags",
     "meta_reflection",
+    "candidate_evidence",
+    "candidate_utility",
+    "candidate_reflection",
     "recommended_action",
     "rationale"
   ],
@@ -28,6 +31,106 @@
     },
     "rationale": {
       "type": "string"
+    },
+    "candidate_evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "rank",
+          "action",
+          "evidence_summary"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "ANSWER",
+              "SEARCH",
+              "CALCULATE",
+              "CLARIFY",
+              "REFUSE"
+            ]
+          },
+          "payload_answer": {
+            "type": "string"
+          },
+          "rationale_answer": {
+            "type": "string"
+          },
+          "payload_answer_type": {
+            "type": "string"
+          },
+          "payload_answer_correct": {
+            "type": "boolean"
+          },
+          "rationale_answer_correct": {
+            "type": "boolean"
+          },
+          "payload_rationale_conflict": {
+            "type": "boolean"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "expression_relevance": {
+            "type": "string"
+          },
+          "expression_matches_gold": {
+            "type": "boolean"
+          },
+          "query_specific_and_relevant": {
+            "type": "boolean"
+          },
+          "targets_critical_slot": {
+            "type": "boolean"
+          },
+          "evidence_summary": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "candidate_utility": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "rank",
+          "action",
+          "score",
+          "reason"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "ANSWER",
+              "SEARCH",
+              "CALCULATE",
+              "CLARIFY",
+              "REFUSE"
+            ]
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "reason": {
+            "type": "string"
+          },
+          "failure_mode": {
+            "type": "string"
+          }
+        }
+      }
     },
     "candidate_helpfulness": {
       "type": "array",
@@ -59,6 +162,35 @@
             "maximum": 1.0
           },
           "reason": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "candidate_reflection": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "rank",
+          "action",
+          "reflection"
+        ],
+        "properties": {
+          "rank": {
+            "type": "integer"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "ANSWER",
+              "SEARCH",
+              "CALCULATE",
+              "CLARIFY",
+              "REFUSE"
+            ]
+          },
+          "reflection": {
             "type": "string"
           }
         }

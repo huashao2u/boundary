@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 from mcagent_boundary.annotation.teacher_label import _validate_teacher_payload, label_boundary_records
+from mcagent_boundary.annotation.validate_teacher_evidence import apply_evidence_score_guardrail
 from mcagent_boundary.adapters.base import StandardizedExample
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
 from mcagent_boundary.rollout.branch_actions import rollout_one_example
 from mcagent_boundary.rollout.candidate_schema import canonicalize_candidate, valid_as_chosen, valid_as_rejected
-from mcagent_boundary.rollout.dataset_selection import apply_selection_preset, selection_summary
+from mcagent_boundary.rollout.dataset_selection import (
+    apply_selection_preset,
+    filter_by_example_ids,
+    load_fixed_example_ids,
+    selection_summary,
+)
 from mcagent_boundary.rollout.state import build_state
 from mcagent_boundary.scoring.utility import utility_rel
 from mcagent_boundary.training.make_dpo_pairs import build_step_dpo_pairs
@@ -115,8 +123,24 @@ class V02FixTests(unittest.TestCase):
             "candidate_utility": [{"rank": 1, "action": "ANSWER", "score": 0.1, "reason": "bad"}]
         }
         example = type("Example", (), {"gold_answer": "4", "task_type": "math", "metadata": {}, "question": "2+2"})()
-        config = {"scoring": {"base_value": {"ANSWER": 1.0}, "action_cost": {}, "semantic_bonus": {}}}
+        config = {"scoring": {"base_value": {"ANSWER": 0.1}, "action_cost": {}, "semantic_bonus": {}}}
         self.assertEqual(utility_rel(branch, teacher_label, {}, example, config), 0.1)
+
+    def test_utility_rel_ignores_base_value_and_supports_small_action_prior(self):
+        branch = {"action": "SEARCH", "rank": 1, "action_input": {"query": "q"}}
+        teacher_label = {
+            "candidate_utility": [{"rank": 1, "action": "SEARCH", "score": 0.8, "reason": "needed"}]
+        }
+        example = type("Example", (), {"gold_answer": "x", "task_type": "factual", "metadata": {}, "question": "q"})()
+        config = {
+            "scoring": {
+                "base_value": {"SEARCH": 0.1},
+                "action_cost": {"SEARCH": 0.1},
+                "action_prior": {"SEARCH": 0.2},
+                "semantic_bonus": {},
+            }
+        }
+        self.assertEqual(utility_rel(branch, teacher_label, {}, example, config), 0.75)
 
     def test_empty_answer_utility_is_zero_even_without_teacher_score(self):
         branch = {
@@ -248,6 +272,50 @@ class V02FixTests(unittest.TestCase):
         scores = {(entry["rank"], entry["action"]): entry["score"] for entry in validated["candidate_helpfulness"]}
         self.assertEqual(scores[(2, "SEARCH")], 0.9)
         self.assertIn((1, "ANSWER"), scores)
+        self.assertEqual(len(validated["candidate_evidence"]), 2)
+        self.assertEqual(len(validated["candidate_reflection"]), 2)
+
+    def test_teacher_payload_requires_evidence_when_score_fallback_disabled(self):
+        candidates = [
+            canonicalize_candidate({"rank": 1, "action": "ANSWER", "action_input": {"answer": "A"}}),
+        ]
+        payload = {
+            "semantic_tags": [],
+            "candidate_utility": [{"rank": 1, "action": "ANSWER", "score": 0.9, "reason": "ok"}],
+            "recommended_action": "ANSWER",
+            "meta_reflection": "Answer.",
+            "rationale": "Direct.",
+        }
+        with self.assertRaises(ValueError):
+            _validate_teacher_payload(payload, "ANSWER", candidates, allow_score_fallback=False)
+
+    def test_evidence_guardrail_caps_wrong_math_answer_and_floors_calculate(self):
+        label = {
+            "candidate_evidence": [
+                {
+                    "rank": 1,
+                    "action": "ANSWER",
+                    "payload_answer_correct": False,
+                    "payload_answer_type": "final_answer",
+                    "payload_rationale_conflict": False,
+                },
+                {
+                    "rank": 2,
+                    "action": "CALCULATE",
+                    "expression_relevance": "direct_final",
+                    "expression_matches_gold": True,
+                },
+            ],
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.9, "reason": "looks right"},
+                {"rank": 2, "action": "CALCULATE", "score": 0.4, "reason": "intermediate"},
+            ],
+        }
+        guarded = apply_evidence_score_guardrail(label, dataset="gsm8k")
+        scores = {(item["rank"], item["action"]): item["score"] for item in guarded["candidate_utility"]}
+        self.assertEqual(scores[(1, "ANSWER")], 0.2)
+        self.assertEqual(scores[(2, "CALCULATE")], 0.8)
+        self.assertTrue(guarded["guardrail_summary"]["guardrail_applied"])
 
     def test_parallel_teacher_labeling_preserves_record_order_with_fallback(self):
         candidates = [
@@ -311,6 +379,21 @@ class V02FixTests(unittest.TestCase):
         self.assertEqual(summary["or_bench_by_label"], {"benign": 4000, "hard": 3, "toxic": 2})
         self.assertEqual(summary["by_dataset"]["mintqa"], 4)
         self.assertEqual(summary["by_dataset"]["in3"], 5)
+
+    def test_fixed_example_ids_support_txt_and_jsonl(self):
+        examples = [
+            StandardizedExample("e1", "gsm8k", "train", "q1", "a1", {}),
+            StandardizedExample("e2", "gsm8k", "train", "q2", "a2", {}),
+        ]
+        with TemporaryDirectory() as tmp:
+            txt_path = Path(tmp) / "ids.txt"
+            txt_path.write_text("# fixed sample\n e2\n", encoding="utf-8")
+            self.assertEqual(load_fixed_example_ids(txt_path), {"e2"})
+            self.assertEqual([item.example_id for item in filter_by_example_ids(examples, {"e2"})], ["e2"])
+
+            jsonl_path = Path(tmp) / "ids.jsonl"
+            jsonl_path.write_text('{"example_id":"e1"}\n', encoding="utf-8")
+            self.assertEqual(load_fixed_example_ids(jsonl_path), {"e1"})
 
     def test_mining_requires_valid_answer_external_competition(self):
         base = {
@@ -399,6 +482,14 @@ class V02FixTests(unittest.TestCase):
                 {"rank": 1, "action": "ANSWER", "score": 0.9, "reason": "sufficient"},
                 {"rank": 2, "action": "SEARCH", "score": 0.1, "reason": "unneeded"},
             ],
+            "candidate_reflection": [
+                {"rank": 1, "action": "ANSWER", "reflection": "I can answer from the payload."},
+                {
+                    "rank": 2,
+                    "action": "SEARCH",
+                    "reflection": "Alternative despite lower utility should be sanitized.",
+                },
+            ],
             "semantic_tags": [],
             "meta_reflection": "Answer directly.",
             "rubric_degenerate": False,
@@ -418,6 +509,9 @@ class V02FixTests(unittest.TestCase):
         self.assertEqual(len(train), 1)
         self.assertFalse(eval_pairs)
         self.assertFalse([item for item in diagnostics if item["reason"] == "teacher_source_not_allowed"])
+        rejected_text = train[0]["rejected"].lower()
+        self.assertNotIn("lower utility", rejected_text)
+        self.assertNotIn("alternative despite", rejected_text)
 
         train, eval_pairs, diagnostics = build_step_dpo_pairs(
             [record],
