@@ -54,6 +54,8 @@ def run_step_dpo(
         max_length=int(training_cfg["max_length"]),
         remove_unused_columns=False,
         report_to=list(training_cfg.get("report_to", [])),
+        do_eval=bool(eval_data),
+        eval_strategy="steps" if eval_data else "no",
         bf16=bool(training_cfg.get("bf16", False)),
         fp16=bool(training_cfg.get("fp16", False)),
         gradient_checkpointing=bool(training_cfg.get("gradient_checkpointing", True)),
@@ -67,6 +69,7 @@ def run_step_dpo(
         processing_class=tokenizer,
     )
     train_result = trainer.train()
+    eval_metrics = trainer.evaluate() if eval_data else {}
     trainer.save_model(str(output_dir))
     metrics = {
         "num_train_pairs": len(train_pairs),
@@ -76,6 +79,11 @@ def run_step_dpo(
         "train_metrics": {
             key: value
             for key, value in train_result.metrics.items()
+            if isinstance(value, (int, float, str, bool)) or value is None
+        },
+        "eval_metrics": {
+            key: value
+            for key, value in eval_metrics.items()
             if isinstance(value, (int, float, str, bool)) or value is None
         },
     }

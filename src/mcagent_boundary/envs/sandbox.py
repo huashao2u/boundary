@@ -30,7 +30,15 @@ class BoundarySandbox:
         tool = self.tools.get(normalized)
         if tool is None:
             raise KeyError(f"Unsupported boundary action: {action_name}")
-        observation, done, info = tool.run(action_input, self.example.to_legacy_sample(), self.history)
+        try:
+            observation, done, info = tool.run(action_input, self.example.to_legacy_sample(), self.history)
+        except Exception as exc:
+            observation = {
+                "status": "tool_error",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            done = False
+            info = {"terminal": False, "helpful": False, "tool_error": True}
         self.history.append({"action": normalized, "action_input": action_input, "observation": observation})
         return observation, done, info
-

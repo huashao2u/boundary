@@ -79,9 +79,9 @@ warmup:
 
 training:
   beta: 0.1
-  per_device_train_batch_size: 1
+  per_device_train_batch_size: 4
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 16
+  gradient_accumulation_steps: 4
   learning_rate: 5.0e-6
   num_train_epochs: 1
   max_steps: 200

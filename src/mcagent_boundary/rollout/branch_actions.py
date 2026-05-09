@@ -25,6 +25,7 @@ from typing import Any
 from mcagent_boundary.envs.sandbox import BoundarySandbox
 from mcagent_boundary.features.process_features import compute_process_feature_details
 from mcagent_boundary.features.semantic_tags import infer_semantic_tag_details
+from mcagent_boundary.prompting.action_decision import build_action_decision_prompt_text
 from mcagent_boundary.rollout.candidate_schema import (
     canonicalize_candidates,
     valid_candidates,
@@ -42,8 +43,16 @@ def _read_prompt(name: str) -> str:
     return (PROMPT_ROOT / name).read_text(encoding="utf-8")
 
 
-def build_student_prompt(example) -> str:
-    """Build the student rollout prompt (v0.2: no dataset/boundary_type leak)."""
+def build_student_prompt(example, config: dict[str, Any] | None = None) -> str:
+    """Build the student prompt (v0.2: no dataset/boundary_type leak)."""
+    prompt_mode = str((config or {}).get("rollout", {}).get("prompt_mode", "top_k")).lower()
+    if prompt_mode in {"single", "single_action", "action_decision"}:
+        return build_action_decision_prompt_text(
+            question=example.question,
+            allowed_actions=example.allowed_actions(),
+            can_clarify=bool(getattr(example, "can_clarify", False)),
+        )
+
     system_prompt = _read_prompt("student_rollout.md").strip()
     allowed_actions = example.allowed_actions()
     tool_list = ", ".join(
@@ -225,7 +234,10 @@ def _score_eval_branches_real(
         branch["utility_real"] = utility_real(branch, example, branch_map, semantic_tags, config)
         branch["outcome_label_real"] = _real_outcome_label(example, branch, branch_map, semantic_tags)
     best = max(valid_for_scoring, key=lambda branch: branch["utility_real"], default=None)
-    natural = next((branch for branch in branches if branch.get("rank") == 1), None)
+    # Branches are already ordered by the valid candidates after schema and
+    # allowed-action filtering. The original rank-1 candidate may have been
+    # dropped, so the natural branch must be the first valid/scored branch.
+    natural = branches[0] if branches else None
     return {
         "best_action_real": None if best is None else best["action"],
         "natural_branch_real": natural,
@@ -353,7 +365,10 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
     semantic tags. Does NOT import utility functions here — utility_rel is
     computed downstream after teacher labeling.
     """
-    prompt_text = build_student_prompt(example)
+    rollout_cfg = config.get("rollout", {})
+    prompt_mode = str(rollout_cfg.get("prompt_mode", "top_k")).lower()
+    single_action_prompt = prompt_mode in {"single", "single_action", "action_decision"}
+    prompt_text = build_student_prompt(example, config)
     legacy_sample = example.to_legacy_sample()
     policy_output = policy.generate_decision(legacy_sample, prompt_text)
 
@@ -364,11 +379,12 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
 
     raw_candidates = policy_output.candidates
     diagnostics: list[dict[str, Any]] = []
-    top_k_actions = int(config.get("rollout", {}).get("top_k_actions", 3))
+    top_k_actions = int(rollout_cfg.get("top_k_actions", 3))
     diagnostics.append({
         "example_id": example.example_id,
         "issue": "candidate_parse_config",
         "top_k_actions": top_k_actions,
+        "prompt_mode": prompt_mode,
     })
 
     # Determine annotation vs eval mode.
@@ -422,13 +438,13 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
 
     valid_candidate_list = valid_candidates(candidates)
     valid_actions = {str(candidate.get("action", "")).upper() for candidate in valid_candidate_list}
-    if "ANSWER" not in valid_actions:
+    if not single_action_prompt and "ANSWER" not in valid_actions:
         diagnostics.append({
             "example_id": example.example_id,
             "issue": "invalid_missing_answer",
             "detail": "ANSWER missing after allowed-action/schema filtering.",
         })
-    if len(valid_candidate_list) < 2:
+    if not single_action_prompt and len(valid_candidate_list) < 2:
         diagnostics.append({
             "example_id": example.example_id,
             "issue": "invalid_single_action",

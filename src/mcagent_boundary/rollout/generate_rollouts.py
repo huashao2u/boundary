@@ -4,6 +4,7 @@ import logging
 import os
 from collections import Counter
 from pathlib import Path
+from typing import Callable
 
 from mcagent_core.rollout.policy import _model_assets_available, build_policy
 
@@ -33,6 +34,15 @@ def _resolve_model_path(config: dict) -> Path:
         if _model_assets_available(str(fallback)):
             return fallback
     return _resolve_path(config, str(config["paths"]["model_root"]))
+
+
+def _resolve_adapter_path(config: dict) -> str | None:
+    student_cfg = config.get("student", {})
+    env_name = str(student_cfg.get("adapter_path_env", "STUDENT_ADAPTER_PATH"))
+    adapter_path = os.environ.get(env_name) or student_cfg.get("adapter_path")
+    if not adapter_path:
+        return None
+    return str(_resolve_path(config, str(adapter_path)))
 
 
 def load_standardized_examples(
@@ -99,6 +109,7 @@ def generate_rollouts(
     selection_preset: str | None = None,
     fixed_example_ids: set[str] | None = None,
     show_progress: bool = True,
+    progress_callback: Callable[[dict], None] | None = None,
 ) -> list[dict]:
     examples = load_standardized_examples(
         config,
@@ -135,6 +146,7 @@ def generate_rollouts(
         ),
         top_k_actions=int(rollout_cfg.get("top_k_actions", 3)),
         candidate_logprob_scoring=dict(rollout_cfg.get("candidate_logprob_scoring") or {}),
+        adapter_path=_resolve_adapter_path(config),
     )
     rollouts: list[dict] = []
     counters: Counter[str] = Counter()
@@ -156,6 +168,18 @@ def generate_rollouts(
             counters["empty_action_input"] += int(record.get("empty_action_input_count") or 0)
             if record.get("diagnostics"):
                 counters["diagnostic_records"] += 1
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "records": counters["records"],
+                        "dataset": dataset_name,
+                        "example_id": example.example_id,
+                        "valid_candidates": counters["valid_candidates"],
+                        "invalid_candidates": counters["invalid_candidates"],
+                        "empty_action_input": counters["empty_action_input"],
+                        "diagnostic_records": counters["diagnostic_records"],
+                    }
+                )
             try:
                 progress.set_postfix(
                     total=counters["records"],

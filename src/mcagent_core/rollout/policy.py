@@ -54,6 +54,24 @@ class PolicyOutput:
 ACTION_SPACE = ("ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE")
 
 
+def _expects_single_action(prompt_text: str) -> bool:
+    return (
+        "choose exactly one action" in prompt_text.lower()
+        and '"decision"' in prompt_text
+        and '"candidates"' not in prompt_text
+    )
+
+
+def _candidate_from_single_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "rank": 1,
+        "action": str(decision.get("action", "ANSWER")).upper(),
+        "confidence": decision.get("confidence"),
+        "brief_rationale": str(decision.get("brief_rationale", "")).strip(),
+        "action_input": decision.get("action_input") or {},
+    }
+
+
 def _prompt_text_to_messages(prompt_text: str) -> list[dict[str, str]]:
     system_part, _, user_part = prompt_text.partition("\n\n")
     if not user_part:
@@ -307,20 +325,27 @@ class HFLocalPolicy:
     def __init__(self, model_path: str, max_new_tokens: int = 256,
                  candidate_temperature: float = 0.7, candidate_top_p: float = 0.95,
                  candidate_top_k: int | None = None,
-                 top_k_actions: int = 3):
+                 top_k_actions: int = 3,
+                 adapter_path: str | None = None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype="auto", device_map="auto")
+        if adapter_path:
+            from peft import PeftModel
+
+            self.model = PeftModel.from_pretrained(self.model, adapter_path)
         self.torch = torch
         self.max_new_tokens = max_new_tokens
         self.candidate_temperature = candidate_temperature
         self.candidate_top_p = candidate_top_p
         self.candidate_top_k = candidate_top_k
         self.top_k_actions = top_k_actions
+        self.adapter_path = adapter_path
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.model.eval()
 
     @staticmethod
     def verify_assets(model_path: str) -> dict[str, Any]:
@@ -406,15 +431,13 @@ class HFLocalPolicy:
                 candidates=candidates,
             )
 
-        # DEPRECATED(mainline): legacy single-decision parse. Current v0.2
-        # training artifacts require parse_candidate_output() top-k candidates;
-        # branch_actions.py excludes records that arrive here from mining/pairs.
         parsed = parse_decision_output(decoded)
         decision = parsed["decision"]
         confidence_source = "decision_confidence_output"
         if decision.get("confidence") is None:
             decision["confidence"] = round(action_probabilities.get(decision["action"], 0.5), 4)
             confidence_source = "action_token_probability"
+        single_action_candidates = [_candidate_from_single_decision(decision)] if _expects_single_action(prompt_text) else None
         return PolicyOutput(
             raw_text=decoded,
             reason=parsed["reason"],
@@ -423,8 +446,8 @@ class HFLocalPolicy:
             action_probabilities=action_probabilities,
             confidence_source=confidence_source,
             reasoning_attempt=parsed["reason"],
-            uncertainty_summary="",
-            candidates=None,
+            uncertainty_summary=str(parsed.get("uncertainty_summary", "")),
+            candidates=single_action_candidates,
         )
 
     def finalize_after_tool(
@@ -577,15 +600,13 @@ class VLLMLocalPolicy:
                 candidate_action_logprobs=candidate_action_logprobs,
             )
 
-        # DEPRECATED(mainline): legacy single-decision parse. Current v0.2
-        # training artifacts require parse_candidate_output() top-k candidates;
-        # branch_actions.py excludes records that arrive here from mining/pairs.
         parsed = parse_decision_output(decoded)
         decision = parsed["decision"]
         confidence_source = "vllm_decision_output"
         if decision.get("confidence") is None:
             decision["confidence"] = round(action_probabilities.get(decision["action"], 0.5), 4)
             confidence_source = "vllm_action_token_probability"
+        single_action_candidates = [_candidate_from_single_decision(decision)] if _expects_single_action(prompt_text) else None
         return PolicyOutput(
             raw_text=decoded,
             reason=parsed["reason"],
@@ -594,8 +615,8 @@ class VLLMLocalPolicy:
             action_probabilities=action_probabilities,
             confidence_source=confidence_source,
             reasoning_attempt=parsed["reason"],
-            uncertainty_summary="",
-            candidates=None,
+            uncertainty_summary=str(parsed.get("uncertainty_summary", "")),
+            candidates=single_action_candidates,
         )
 
     def finalize_after_tool(
@@ -744,6 +765,7 @@ def build_policy(
     vllm_max_model_len: int | None = None,
     top_k_actions: int = 3,
     candidate_logprob_scoring: dict[str, Any] | None = None,
+    adapter_path: str | None = None,
 ):
     # Accept both old name (exploration_rate) and new name (heuristic_exploration_rate).
     if backend == "heuristic":
@@ -753,8 +775,11 @@ def build_policy(
         return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
                              candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p,
                              candidate_top_k=candidate_top_k,
-                             top_k_actions=top_k_actions)
+                             top_k_actions=top_k_actions,
+                             adapter_path=adapter_path)
     if backend == "vllm":
+        if adapter_path:
+            raise ValueError("adapter_path evaluation currently requires rollout.backend=hf.")
         return VLLMLocalPolicy(
             model_path=model_path,
             max_new_tokens=max_new_tokens,
@@ -771,7 +796,8 @@ def build_policy(
             return HFLocalPolicy(model_path=model_path, max_new_tokens=max_new_tokens,
                                  candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p,
                                  candidate_top_k=candidate_top_k,
-                                 top_k_actions=top_k_actions)
+                                 top_k_actions=top_k_actions,
+                                 adapter_path=adapter_path)
         # DEPRECATED(mainline): auto demotion to heuristic is smoke-only.
         logger.warning(
             "rollout.backend=auto: student model assets not found at %r — "

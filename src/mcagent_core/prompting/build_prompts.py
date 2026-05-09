@@ -201,6 +201,9 @@ def parse_decision_output(raw_text: str) -> dict[str, Any]:
             },
         }
 
+    reasoning_raw = parsed.get("reasoning", {})
+    if not isinstance(reasoning_raw, dict):
+        reasoning_raw = {}
     decision = parsed.get("decision", parsed)
     action = str(decision.get("action", "ANSWER")).upper()
     if action not in ALLOWED_ACTIONS:
@@ -208,13 +211,17 @@ def parse_decision_output(raw_text: str) -> dict[str, Any]:
     action_input = decision.get("action_input", {}) or {}
     if not isinstance(action_input, dict):
         action_input = {}
+    action_input = _minimal_repair_action_input(action, action_input)
     confidence = decision.get("confidence")
     try:
         confidence = None if confidence is None else max(0.0, min(1.0, float(confidence)))
     except (TypeError, ValueError):
         confidence = None
+    reason = str(reasoning_raw.get("attempt") or parsed.get("reason", "")).strip()
     return {
-        "reason": str(parsed.get("reason", "")).strip(),
+        "reason": reason,
+        "uncertainty_summary": str(reasoning_raw.get("uncertainty_summary", "")).strip(),
+        "need_external_help": bool(reasoning_raw.get("need_external_help", False)),
         "decision": {
             "action": action,
             "confidence": confidence,

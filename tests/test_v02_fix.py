@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import json
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from mcagent_boundary.annotation.teacher_label import _validate_teacher_payload,
 from mcagent_boundary.annotation.validate_teacher_evidence import apply_evidence_score_guardrail
 from mcagent_boundary.adapters.base import StandardizedExample
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
-from mcagent_boundary.rollout.branch_actions import rollout_one_example
+from mcagent_boundary.rollout.branch_actions import _score_eval_branches_real, rollout_one_example
 from mcagent_boundary.rollout.candidate_schema import canonicalize_candidate, valid_as_chosen, valid_as_rejected
 from mcagent_boundary.rollout.dataset_selection import (
     apply_selection_preset,
@@ -22,7 +23,7 @@ from mcagent_boundary.training.make_dpo_pairs import build_step_dpo_pairs
 from mcagent_boundary.training.run_step_dpo import to_message_dpo_row
 from mcagent_core.features.extract_process_features import extract_process_features
 from mcagent_core.features.semantic_tags import build_semantic_tag_details_from_state
-from mcagent_core.prompting.build_prompts import parse_candidate_output
+from mcagent_core.prompting.build_prompts import parse_candidate_output, parse_decision_output
 from mcagent_core.rollout.policy import PolicyOutput
 
 
@@ -89,6 +90,76 @@ class V02FixTests(unittest.TestCase):
         self.assertNotIn("SEARCH", [candidate["action"] for candidate in record["candidates"]])
         self.assertEqual(record["valid_candidate_count"], 2)
         self.assertTrue(any(diag.get("issue") == "candidate_action_not_allowed" for diag in record["diagnostics"]))
+
+    def test_single_action_eval_prompt_accepts_one_valid_decision(self):
+        class FakePolicy:
+            def generate_decision(self, sample, prompt_text):
+                self.prompt_text = prompt_text
+                return PolicyOutput(
+                    raw_text="{}",
+                    reason="Small arithmetic can be answered directly.",
+                    decision={
+                        "action": "ANSWER",
+                        "confidence": 0.9,
+                        "brief_rationale": "No tool is necessary for this small arithmetic check.",
+                        "action_input": {"answer": "4"},
+                    },
+                    candidates=[
+                        {
+                            "rank": 1,
+                            "action": "ANSWER",
+                            "confidence": 0.9,
+                            "brief_rationale": "No tool is necessary for this small arithmetic check.",
+                            "action_input": {"answer": "4"},
+                        }
+                    ],
+                )
+
+        example = StandardizedExample(
+            example_id="gsm8k-single-action",
+            dataset="gsm8k",
+            split="train",
+            question="What is 2+2?",
+            gold_answer="4",
+            metadata={"boundary_type": "reasoning", "can_calculate": True},
+        )
+        config = {
+            "annotation": {"execute_tools": False},
+            "features": {"long_reason_token_threshold": 80},
+            "rollout": {"prompt_mode": "single_action", "top_k_actions": 3, "candidate_logprob_scoring": {}},
+        }
+        policy = FakePolicy()
+        record = rollout_one_example(example, config, phase="train", policy=policy)
+        self.assertIn("choose exactly one action", policy.prompt_text.lower())
+        self.assertEqual(record["valid_candidate_count"], 1)
+        self.assertFalse(any(diag.get("issue") == "invalid_single_action" for diag in record["diagnostics"]))
+
+    def test_single_decision_parser_reads_reasoning_schema_and_repairs_action_input(self):
+        parsed = parse_decision_output(
+            """
+            {
+              "reasoning": {"attempt": "Need evidence.", "uncertainty_summary": "fresh fact", "need_external_help": true},
+              "decision": {"action": "SEARCH", "confidence": 0.7, "brief_rationale": "External evidence is needed.", "action_input": {"search_query": "example query"}}
+            }
+            """
+        )
+        self.assertEqual(parsed["reason"], "Need evidence.")
+        self.assertEqual(parsed["uncertainty_summary"], "fresh fact")
+        self.assertEqual(parsed["decision"]["action_input"], {"search_query": "example query"})
+
+    def test_eval_natural_branch_uses_first_valid_candidate_after_filtering(self):
+        branches = [
+            {
+                "action": "CALCULATE",
+                "rank": 2,
+                "valid_for_eval_scoring": False,
+                "final_answer": "",
+                "correctness": False,
+            }
+        ]
+        example = type("Example", (), {"metadata": {}, "gold_answer": "4", "task_type": "math", "question": "2+2"})()
+        result = _score_eval_branches_real(branches, example, {}, {"scoring": {}})
+        self.assertIs(result["natural_branch_real"], branches[0])
 
     def test_state_hash_includes_active_process_features(self):
         example = StandardizedExample(
@@ -512,6 +583,15 @@ class V02FixTests(unittest.TestCase):
         rejected_text = train[0]["rejected"].lower()
         self.assertNotIn("lower utility", rejected_text)
         self.assertNotIn("alternative despite", rejected_text)
+        chosen_payload = json.loads(train[0]["chosen"])
+        self.assertIn("reasoning", chosen_payload)
+        self.assertIn("decision", chosen_payload)
+        self.assertEqual(
+            list(chosen_payload["decision"].keys()),
+            ["action", "confidence", "brief_rationale", "action_input"],
+        )
+        self.assertEqual(len(train[0]["chosen_messages"]), 1)
+        self.assertIn("choose exactly one action", train[0]["prompt_messages"][0]["content"].lower())
 
         train, eval_pairs, diagnostics = build_step_dpo_pairs(
             [record],

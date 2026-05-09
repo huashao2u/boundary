@@ -25,9 +25,9 @@ tools:
   search:
     backend: local_retriever
     train_backend: local_retriever
-    eval_backend: local_retriever
+    eval_backend: serper
     top_k: 3
-    enable_online_backend: false
+    enable_online_backend: true
     online_timeout_seconds: 30
     country_code: us
     language_code: en

@@ -285,6 +285,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evi
   负例进入 pair，不能作为 chosen。空 `SEARCH` / `CLARIFY` / `CALCULATE` 仍会被过滤。
 - completion reflection 优先使用 teacher 的 `candidate_reflection`，避免在 rejected completion 中写入
   `lower utility` / `rejected` / `worse` 等显式负面 marker。
+- pair 选择仍来自 top-k rollout candidates，但 DPO 样本本身使用
+  `student_action_decision.md` 的单 action JSON schema，与 `07_eval.py` 默认推理 prompt 一致；训练样本只到
+  action emission，不执行 search/calculator/clarify/refuse 工具，也不包含 tool observation/finalize。
 - 聚合 pair 之外，会额外写 `by_dataset/<dataset>/train_step_dpo_pairs.jsonl` 和
   `by_dataset/<dataset>/eval_step_dpo_pairs.jsonl`。
 
@@ -348,7 +351,7 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/05_optional_warmup.py --run-
 
 读取配置路径中的 `train_step_dpo_pairs.jsonl` / `eval_step_dpo_pairs.jsonl`，运行 TRL DPOTrainer。
 训练入口只把 `prompt_messages/chosen_messages/rejected_messages` 转成 conversational
-`prompt/chosen/rejected` 传给 trainer；flat text 字段仅用于 debug/export。
+`prompt/chosen/rejected` 传给 trainer；flat text 字段仅用于 debug/export。DPO 训练不执行任何工具查询。
 
 参数：
 
@@ -360,8 +363,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/06_train_dpo.py --smoke
 
 ### `07_eval.py`
 
-读取 `datasets.eval`，执行 eval-side rollout 和动作/任务/校准指标。当前 `rollout.yaml` 中 eval
-数据集为空；TruthfulQA / RealTimeQA adapter 只是未来扩展 hook。
+读取 `datasets.eval`，执行 eval-side rollout 和动作/任务/校准指标。默认使用
+`student_action_decision.md` 的单 action prompt（`--prompt-mode single_action`），与 DPO pair 中的
+训练 prompt/completion schema 对齐；如需调试旧 top-k eval，可显式传 `--prompt-mode top_k`。
+当前 `rollout.yaml` 中 eval 数据集为空；TruthfulQA / RealTimeQA adapter 只是未来扩展 hook。
 
 ```bash
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/07_eval.py --limit-per-dataset 20
@@ -391,7 +396,8 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/07_eval.py --limit-per-datas
 - `src/mcagent_boundary/mining/boundary_mining.py`
   - `_legacy_utility_pool()`：兼容旧 rollout 的 utility 字段，当前 v0.2 主干不走。
 - `src/mcagent_core/prompting/build_prompts.py`
-  - legacy single-decision prompt/parser helpers：当前 student prompt 使用 `student_rollout.md` 和 top-k parser。
+  - top-k parser 仍用于 02 rollout/mining；single-decision parser 用于 `student_action_decision.md` 的
+    DPO/eval schema。
 - `src/mcagent_boundary/rollout/branch_actions.py`
   - heuristic finalize fallback：eval-only，不参与训练侧 boundary mining / pair construction。
 - `src/mcagent_boundary/scripts/00_inspect_legacy.py`

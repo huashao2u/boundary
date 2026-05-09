@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-# NOTE(boundary v0.2): Pair construction now sources exclusively from student-proposed
-# top-k candidates ranked by U_rel (not U_real/outcome). Pairs are truncated at action
-# emission (no tool obs/finalize in training pairs). Chosen = argmax U_rel with
-# rubric_degenerate=false; Rejected = lowest U_rel with different action type and
-# gap >= min_utility_gap (0.2). Message format: prompt_messages/chosen_messages/rejected_messages.
+# NOTE(boundary v0.2): Pair selection still sources from student-proposed top-k
+# candidates ranked by U_rel (not U_real/outcome), but DPO samples train the
+# single-action decision format used by eval. Training pairs end at action
+# emission: no tool execution, no query execution, and no finalize pass.
+# Chosen = argmax U_rel with rubric_degenerate=false; Rejected = lowest U_rel
+# with different action type and gap >= min_utility_gap (0.2).
 # See §pair_construction in rollout.yaml.
 #
-import json
 import logging
 import re
 from hashlib import sha1
 from typing import Any, Iterable, Literal
 
+from mcagent_boundary.prompting.action_decision import (
+    build_action_decision_completion,
+    build_action_decision_prompt_messages,
+    build_action_decision_prompt_text,
+)
 from mcagent_boundary.rollout.candidate_schema import (
     is_valid_candidate,
     is_empty_answer_rejected_only,
@@ -49,35 +54,38 @@ _REFLECTION_MARKER_REPLACEMENTS = {
 # ---------------------------------------------------------------------------
 
 def _build_prompt_messages(record: dict[str, Any]) -> list[dict[str, str]]:
-    """Build prompt messages from student rollout record.
+    """Build the same single-action prompt used by eval."""
+    return build_action_decision_prompt_messages(
+        question=record["question"],
+        allowed_actions=_allowed_actions_from_record(record),
+        can_clarify=_record_can_clarify(record),
+    )
 
-    v0.2: uses student's own reasoning prefix as assistant turn; dataset/boundary
-    metadata is excluded from the prompt (§1 no gold/boundary leak to student).
-    Prompt is truncated at the point of action emission.
-    """
-    candidates = list(record.get("candidates") or [])
-    allowed_tools = [
-        c["action"] for c in candidates if str(c.get("action", "")).upper() != "ANSWER"
-    ]
-    tool_list = ", ".join(dict.fromkeys(a.upper() for a in allowed_tools))  # preserve order, dedup
 
-    return [
-        {
-            "role": "system",
-            "content": "You are a decision-aware assistant. Choose the next action calibrated to the current boundary state.",
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Question: {record['question']}\n"
-                f"Available actions: ANSWER{', ' + tool_list if tool_list else ''}"
-            ),
-        },
-        {
-            "role": "assistant",
-            "content": f"Reasoning: {record.get('reason_prefix', '')}",
-        },
-    ]
+def _record_can_clarify(record: dict[str, Any]) -> bool:
+    metadata = dict(record.get("metadata") or {})
+    if "can_clarify" in metadata:
+        return bool(metadata.get("can_clarify"))
+    return any(str(candidate.get("action", "")).upper() == "CLARIFY" for candidate in record.get("candidates") or [])
+
+
+def _allowed_actions_from_record(record: dict[str, Any]) -> list[str]:
+    actions = ["ANSWER"]
+    metadata = dict(record.get("metadata") or {})
+    metadata_action_flags = {
+        "SEARCH": "can_search",
+        "CALCULATE": "can_calculate",
+        "CLARIFY": "can_clarify",
+        "REFUSE": "allow_refuse",
+    }
+    for action, flag in metadata_action_flags.items():
+        if bool(metadata.get(flag)):
+            actions.append(action)
+    for candidate in record.get("candidates") or []:
+        action = str(candidate.get("action", "")).upper()
+        if action in _ACTION_SET and action not in actions:
+            actions.append(action)
+    return actions
 
 
 def _reflection_for_role(
@@ -164,28 +172,23 @@ def _build_completion_messages(
     """Build completion messages truncated at action emission (no tool obs/finalize)."""
     reflection = _reflection_for_role(branch, teacher_label, role_label)
     # action_input from the candidate — guaranteed no gold injection by branch_actions.py
-    payload = {
-        "action": branch["action"],
-        "action_input": branch.get("canonical_action_input") or branch.get("action_input", {}),
-    }
-    return [
-        {"role": "assistant", "content": f"Meta-Reflection: {reflection}"},
-        {"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
+    completion = build_action_decision_completion(
+        action=branch["action"],
+        action_input=branch.get("canonical_action_input") or branch.get("action_input", {}),
+        confidence=branch.get("confidence"),
+        reasoning_attempt=reflection,
+        uncertainty_summary="",
+        brief_rationale=reflection,
+    )
+    return [{"role": "assistant", "content": completion}]
 
 
 def _render_prompt_text(record: dict[str, Any]) -> str:
     """Legacy flat-text prompt for backward compat / debugging."""
-    candidates = list(record.get("candidates") or [])
-    tool_list = ", ".join(
-        dict.fromkeys(c["action"].upper() for c in candidates if c.get("action", "").upper() != "ANSWER")
-    )
-    return (
-        "SYSTEM: You are a decision-aware assistant. Choose the next action calibrated to the current boundary state.\n"
-        f"USER: Question: {record['question']}\n"
-        f"Available actions: ANSWER{', ' + tool_list if tool_list else ''}\n"
-        f"ASSISTANT: Reasoning: {record.get('reason_prefix', '')}\n"
-        "ASSISTANT:"
+    return build_action_decision_prompt_text(
+        question=record["question"],
+        allowed_actions=_allowed_actions_from_record(record),
+        can_clarify=_record_can_clarify(record),
     )
 
 
@@ -196,11 +199,14 @@ def _render_completion_text(
 ) -> str:
     """Legacy flat-text completion for backward compat / debugging."""
     reflection = _reflection_for_role(branch, teacher_label, role_label)
-    payload = {
-        "action": branch["action"],
-        "action_input": branch.get("canonical_action_input") or branch.get("action_input", {}),
-    }
-    return f" Meta-Reflection: {reflection}\n{json.dumps(payload, ensure_ascii=False)}"
+    return build_action_decision_completion(
+        action=branch["action"],
+        action_input=branch.get("canonical_action_input") or branch.get("action_input", {}),
+        confidence=branch.get("confidence"),
+        reasoning_attempt=reflection,
+        uncertainty_summary="",
+        brief_rationale=reflection,
+    )
 
 
 # ---------------------------------------------------------------------------
