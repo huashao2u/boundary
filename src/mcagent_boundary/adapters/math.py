@@ -11,7 +11,7 @@ class MathAdapter(DatasetAdapter):
     can_search = False
     can_calculate = True
     can_clarify = False
-    allow_refuse = True
+    allow_refuse = False
 
     def _convert(self, sample, split: str) -> StandardizedExample:
         metadata = self._base_metadata(sample, split)

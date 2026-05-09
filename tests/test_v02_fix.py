@@ -6,10 +6,15 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from mcagent_boundary.annotation.teacher_label import _validate_teacher_payload, label_boundary_records
-from mcagent_boundary.annotation.validate_teacher_evidence import apply_evidence_score_guardrail
+from mcagent_boundary.annotation.validate_teacher_evidence import (
+    apply_evidence_score_guardrail,
+    build_auto_candidate_evidence,
+    extract_final_numeric_answer,
+    safe_eval_expression,
+)
 from mcagent_boundary.adapters.base import StandardizedExample
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
-from mcagent_boundary.rollout.branch_actions import _score_eval_branches_real, rollout_one_example
+from mcagent_boundary.rollout.branch_actions import _score_eval_branches_real, build_student_prompt, rollout_one_example
 from mcagent_boundary.rollout.candidate_schema import canonicalize_candidate, valid_as_chosen, valid_as_rejected
 from mcagent_boundary.rollout.dataset_selection import (
     apply_selection_preset,
@@ -89,7 +94,32 @@ class V02FixTests(unittest.TestCase):
         record = rollout_one_example(example, config, phase="train", policy=FakePolicy())
         self.assertNotIn("SEARCH", [candidate["action"] for candidate in record["candidates"]])
         self.assertEqual(record["valid_candidate_count"], 2)
+        self.assertEqual(record["allowed_actions"], ["ANSWER", "CALCULATE"])
+        self.assertEqual(record["effective_top_k"], 2)
         self.assertTrue(any(diag.get("issue") == "candidate_action_not_allowed" for diag in record["diagnostics"]))
+
+    def test_topk_prompt_is_dynamic_for_two_action_math_space(self):
+        example = StandardizedExample(
+            example_id="math-dynamic-topk",
+            dataset="math",
+            split="train",
+            question="Evaluate 3*(4^2)+2.",
+            gold_answer="50",
+            metadata={
+                "boundary_type": "reasoning",
+                "can_search": False,
+                "can_calculate": True,
+                "can_clarify": False,
+                "allow_refuse": False,
+            },
+        )
+        prompt = build_student_prompt(
+            example,
+            {"rollout": {"top_k_actions": 3, "candidate_logprob_scoring": {}}},
+        )
+        self.assertIn("exactly 2 candidates", prompt)
+        self.assertIn("ANSWER, CALCULATE", prompt)
+        self.assertNotIn("Returning 3 is preferred", prompt)
 
     def test_single_action_eval_prompt_accepts_one_valid_decision(self):
         class FakePolicy:
@@ -387,6 +417,46 @@ class V02FixTests(unittest.TestCase):
         self.assertEqual(scores[(1, "ANSWER")], 0.2)
         self.assertEqual(scores[(2, "CALCULATE")], 0.8)
         self.assertTrue(guarded["guardrail_summary"]["guardrail_applied"])
+
+    def test_payload_semantic_guardrail_caps_answer_shell_refusal(self):
+        label = {
+            "candidate_evidence": [
+                {
+                    "rank": 1,
+                    "action": "ANSWER",
+                    "payload_semantic_type": "refusal_text",
+                    "payload_matches_action_type": False,
+                }
+            ],
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.9, "reason": "looks safe"},
+            ],
+        }
+        guarded = apply_evidence_score_guardrail(label, dataset="mintqa")
+        utility = guarded["candidate_utility"][0]
+        self.assertEqual(utility["score"], 0.3)
+        self.assertEqual(utility["failure_mode"], "payload_action_mismatch")
+
+    def test_math_answer_and_expression_normalization(self):
+        self.assertEqual(extract_final_numeric_answer(r"Solution: \boxed{5}"), "5")
+        self.assertEqual(extract_final_numeric_answer("2 dozen"), "24")
+        self.assertEqual(safe_eval_expression("3*(4**2)+2"), 50.0)
+        self.assertEqual(safe_eval_expression("sqrt(16) + 2^3"), 12.0)
+        self.assertEqual(safe_eval_expression("solve(4*x + 5 - 9, x)[0]"), 1.0)
+        self.assertEqual(safe_eval_expression("solve(Eq(4*x + 5, 9), x)[0]"), 1.0)
+        self.assertEqual(safe_eval_expression("4*x + 5 = 9"), 1.0)
+        self.assertEqual(safe_eval_expression("solve（4*x + 5 - 9， x）[0]"), 1.0)
+        self.assertIsNone(safe_eval_expression("__import__('os').system('echo nope')"))
+
+    def test_auto_evidence_adds_or_bench_action_and_behavior_correctness(self):
+        evidence = build_auto_candidate_evidence(
+            {"rank": 1, "action": "ANSWER", "action_input": {"answer": "I cannot help with that."}},
+            dataset="or_bench",
+            metadata={"should_refuse": True},
+        )
+        self.assertEqual(evidence["payload_semantic_type"], "refusal_text")
+        self.assertFalse(evidence["action_correctness"])
+        self.assertTrue(evidence["behavioral_correctness"])
 
     def test_parallel_teacher_labeling_preserves_record_order_with_fallback(self):
         candidates = [

@@ -134,7 +134,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py \
 
 ### `02_rollout_all.py`
 
-功能：运行学生 policy，解析 top-k action candidates，只写训练侧 rollout 记录。v0.2.3 默认使用
+功能：运行学生 policy，解析 top-k action candidates，只写训练侧 rollout 记录。v0.2.6 按
+`allowed_actions` 自适应 `effective_top_k=min(top_k_actions, len(allowed_actions))`：GSM8K/MATH
+默认只开放 `ANSWER/CALCULATE`，OR-Bench 只开放 `ANSWER/REFUSE`，因此这些数据集默认要求 2 个
+不同 action candidates。v0.2.3 起默认使用
 vLLM，并对每个 student candidate 的 action JSON 计算 teacher-forced logprob mean，作为
 process uncertainty 诊断信号。boundary / anchor 挖掘已拆到 `02b_mine_boundary.py`，因此可以
 基于同一份 `all_rollouts.jsonl` 反复调阈值和采样配额。
@@ -206,7 +209,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/02b_mine_boundary.py \
 功能：读取 `boundary_candidates` 和 anchor records，调用 OpenAI-compatible teacher 评估每个
 student candidate 的 helpfulness，写出 `teacher_labels.jsonl`。v0.2.6 teacher prompt 要求先输出
 `candidate_evidence`，再输出 `candidate_utility`，并会对 evidence/score 明显矛盾的情况写入
-guardrail diagnostics。成功标签的 `source` 来自 `teacher.source_label`，默认是 `llm_teacher`；
+guardrail diagnostics。label 会原样保留 `gold_answer`、`metadata` 与 `gold_reference`；candidate
+evidence 会包含 `payload_semantic_type`、`payload_matches_action_type`，OR-Bench 还会区分
+`action_correctness` 与 `behavioral_correctness`。成功标签的 `source` 来自 `teacher.source_label`，默认是 `llm_teacher`；
 标签中同时记录 `teacher_provider` 与 `teacher_model`，便于追踪实验来源。
 
 参数：
@@ -250,7 +255,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03_teacher_label_boundary.py
 输出 label 会保留 `candidate_evidence`、`candidate_reflection`、guardrailed 后的
 `candidate_utility`，并在每个 utility entry 中记录 `original_score`、`guardrailed_score`、
 `guardrail_applied` 和 `guardrail_reasons`。数学数据集会强制 payload-first caps/floors，
-例如 wrong ANSWER payload 最高 0.2、direct-final CALCULATE 至少 0.8。
+例如 wrong ANSWER payload 最高 0.2、direct-final CALCULATE 至少 0.8；通用 ANSWER
+payload/action mismatch 最高 0.3；OR-Bench 额外记录 answer-shell-refusal、over-refusal 与
+unsafe-compliance 类失败模式。
 
 参数：
 

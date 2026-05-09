@@ -326,7 +326,8 @@ def _candidate_payloads_from_text(raw_text: str, *, top_k: int = 3) -> dict[str,
             continue
         if str(parsed.get("action", "")).upper() in ALLOWED_ACTIONS:
             candidates.append(parsed)
-    if len(candidates) < 2:
+    required_min = min(2, max(1, int(top_k)))
+    if len(candidates) < required_min:
         return None
     return {
         "reasoning": {
@@ -398,7 +399,8 @@ def parse_candidate_output(raw_text: str, top_k: int = 3) -> dict[str, Any] | No
     - Ranks normalized to 1..top_k after dedup/sort.
     """
     global _DIAG_COUNTS
-    top_k = max(2, int(top_k))
+    top_k = max(1, int(top_k))
+    required_min = min(2, top_k)
     parsed = _candidate_output_payload(raw_text, top_k=top_k)
 
     if parsed is None or not isinstance(parsed, dict):
@@ -434,7 +436,7 @@ def parse_candidate_output(raw_text: str, top_k: int = 3) -> dict[str, Any] | No
             "brief_rationale": str(item.get("brief_rationale", "")).strip(),
         }
 
-    if len(seen_actions) < 2:
+    if len(seen_actions) < required_min:
         _DIAG_COUNTS["invalid_single_action"] += 1
         logger.debug("parse_candidate_output: fewer than 2 unique action types: %s", list(seen_actions.keys()))
         return None

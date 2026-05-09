@@ -615,6 +615,22 @@ def build_step_dpo_pairs(
             "rejected": _render_completion_text(rejected_cand, teacher_label, role_label="rejected"),
             "chosen_action": chosen_cand["action"],
             "rejected_action": rejected_cand["action"],
+            "chosen_candidate": {
+                **chosen_cand,
+                "teacher_evidence": _candidate_teacher_entry(
+                    teacher_label,
+                    chosen_cand,
+                    field="candidate_evidence",
+                ),
+            },
+            "rejected_candidate": {
+                **rejected_cand,
+                "teacher_evidence": _candidate_teacher_entry(
+                    teacher_label,
+                    rejected_cand,
+                    field="candidate_evidence",
+                ),
+            },
             "metadata": {
                 "dataset": record["dataset"],
                 "boundary_type": record["boundary_type"],

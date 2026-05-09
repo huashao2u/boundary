@@ -54,6 +54,46 @@ class PolicyOutput:
 ACTION_SPACE = ("ANSWER", "SEARCH", "CALCULATE", "CLARIFY", "REFUSE")
 
 
+def _allowed_actions_from_prompt(prompt_text: str) -> tuple[str, ...]:
+    actions: list[str] = []
+    capture = False
+    for line in prompt_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Current allowed actions for this example:"):
+            capture = True
+            continue
+        if capture:
+            if stripped.startswith("- "):
+                action = stripped[2:].strip().upper()
+                if action in ACTION_SPACE and action not in actions:
+                    actions.append(action)
+                continue
+            if stripped:
+                break
+    if actions:
+        return tuple(actions)
+
+    match = re.search(
+        r"allowed action list for this example:\s*([A-Z,\s]+)",
+        prompt_text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        for raw in match.group(1).split(","):
+            action = raw.strip().upper()
+            if action in ACTION_SPACE and action not in actions:
+                actions.append(action)
+    return tuple(actions) if actions else ACTION_SPACE
+
+
+def _effective_top_k_from_prompt(prompt_text: str, fallback: int) -> int:
+    match = re.search(r"exactly\s+(\d+)\s+candidates", prompt_text, flags=re.IGNORECASE)
+    if match:
+        return max(1, int(match.group(1)))
+    allowed = _allowed_actions_from_prompt(prompt_text)
+    return max(1, min(int(fallback), len(allowed)))
+
+
 def _expects_single_action(prompt_text: str) -> bool:
     return (
         "choose exactly one action" in prompt_text.lower()
@@ -403,7 +443,8 @@ class HFLocalPolicy:
         decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
 
         # Try v0.2 candidate parser first, fall back to legacy single-decision parser.
-        candidate_parsed = parse_candidate_output(decoded, top_k=self.top_k_actions)
+        effective_top_k = _effective_top_k_from_prompt(prompt_text, self.top_k_actions)
+        candidate_parsed = parse_candidate_output(decoded, top_k=effective_top_k)
         if candidate_parsed is not None:
             candidates = candidate_parsed["candidates"]
             reasoning = candidate_parsed["reasoning"]
@@ -475,7 +516,7 @@ class HFLocalPolicy:
             outputs = self.model(**inputs)
             logits = outputs.logits[:, -1, :]
         token_ids = {}
-        for action in ACTION_SPACE:
+        for action in _allowed_actions_from_prompt(prompt_text):
             encoded = self.tokenizer.encode(action, add_special_tokens=False)
             token_ids[action] = encoded[0] if encoded else None
         selected_actions = [action for action, token_id in token_ids.items() if token_id is not None]
@@ -555,7 +596,8 @@ class VLLMLocalPolicy:
         outputs = self.llm.generate([formatted_prompt], sampling_params, use_tqdm=False)
         decoded = outputs[0].outputs[0].text if outputs and outputs[0].outputs else ""
 
-        candidate_parsed = parse_candidate_output(decoded, top_k=self.top_k_actions)
+        effective_top_k = _effective_top_k_from_prompt(prompt_text, self.top_k_actions)
+        candidate_parsed = parse_candidate_output(decoded, top_k=effective_top_k)
         if candidate_parsed is not None:
             candidates = candidate_parsed["candidates"]
             candidate_action_logprobs: list[dict[str, Any]] | None = None
@@ -693,7 +735,7 @@ class VLLMLocalPolicy:
     def _score_action_options(self, prompt_text: str) -> tuple[dict[str, float], dict[str, float]]:
         diagnostic_prompt = prompt_text + '\nDiagnostic action classifier.\nAction: '
         token_ids: dict[str, int] = {}
-        for action in ACTION_SPACE:
+        for action in _allowed_actions_from_prompt(prompt_text):
             encoded = self.tokenizer.encode(action, add_special_tokens=False)
             if encoded:
                 token_ids[action] = encoded[0]

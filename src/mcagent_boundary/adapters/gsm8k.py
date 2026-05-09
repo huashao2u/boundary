@@ -11,7 +11,7 @@ class GSM8KAdapter(DatasetAdapter):
     can_search = False
     can_calculate = True
     can_clarify = False
-    allow_refuse = True
+    allow_refuse = False
 
     def _convert(self, sample, split: str) -> StandardizedExample:
         return StandardizedExample(
@@ -22,4 +22,3 @@ class GSM8KAdapter(DatasetAdapter):
             gold_answer=sample.gold_answer,
             metadata=self._base_metadata(sample, split),
         )
-

@@ -43,6 +43,15 @@ def _read_prompt(name: str) -> str:
     return (PROMPT_ROOT / name).read_text(encoding="utf-8")
 
 
+def effective_top_k_for_example(example, config: dict[str, Any] | None = None) -> int:
+    rollout_cfg = (config or {}).get("rollout", {})
+    config_top_k = int(rollout_cfg.get("top_k_actions", 3))
+    allowed_count = len(example.allowed_actions())
+    if allowed_count <= 0:
+        return 0
+    return max(1, min(config_top_k, allowed_count))
+
+
 def build_student_prompt(example, config: dict[str, Any] | None = None) -> str:
     """Build the student prompt (v0.2: no dataset/boundary_type leak)."""
     prompt_mode = str((config or {}).get("rollout", {}).get("prompt_mode", "top_k")).lower()
@@ -53,8 +62,14 @@ def build_student_prompt(example, config: dict[str, Any] | None = None) -> str:
             can_clarify=bool(getattr(example, "can_clarify", False)),
         )
 
-    system_prompt = _read_prompt("student_rollout.md").strip()
     allowed_actions = example.allowed_actions()
+    effective_top_k = effective_top_k_for_example(example, config)
+    system_prompt = (
+        _read_prompt("student_rollout.md")
+        .strip()
+        .replace("{{EFFECTIVE_TOP_K}}", str(effective_top_k))
+        .replace("{{ALLOWED_ACTIONS}}", ", ".join(allowed_actions))
+    )
     tool_list = ", ".join(
         action.lower() for action in allowed_actions if action != "ANSWER"
     )
@@ -74,6 +89,26 @@ def build_student_prompt(example, config: dict[str, Any] | None = None) -> str:
 def _dynamic_student_examples(allowed_actions: list[str]) -> str:
     actions = set(allowed_actions)
     examples: list[str] = []
+    if "CALCULATE" in actions and actions <= {"ANSWER", "CALCULATE"}:
+        examples.append(
+            """
+
+### Math calculation boundary example
+```json
+{
+  "reasoning": {
+    "attempt": "The arithmetic can be reasoned through, and a calculator action can independently verify the final value.",
+    "uncertainty_summary": "The only uncertainty is arithmetic error.",
+    "need_external_help": true
+  },
+  "candidates": [
+    {"rank": 1, "action": "ANSWER", "confidence": 0.72, "brief_rationale": "The calculation is simple enough to answer directly.", "action_input": {"answer": "50"}},
+    {"rank": 2, "action": "CALCULATE", "confidence": 0.58, "brief_rationale": "The executable expression can verify the numeric result.", "action_input": {"expression": "3*(4**2)+2"}}
+  ]
+}
+```
+""".rstrip()
+        )
     if "CLARIFY" in actions:
         examples.append(
             """
@@ -379,11 +414,16 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
 
     raw_candidates = policy_output.candidates
     diagnostics: list[dict[str, Any]] = []
-    top_k_actions = int(rollout_cfg.get("top_k_actions", 3))
+    allowed_actions_list = example.allowed_actions()
+    top_k_actions = effective_top_k_for_example(example, config)
+    required_min_candidates = min(2, len(allowed_actions_list))
     diagnostics.append({
         "example_id": example.example_id,
         "issue": "candidate_parse_config",
         "top_k_actions": top_k_actions,
+        "effective_top_k": top_k_actions,
+        "required_min_candidates": required_min_candidates,
+        "allowed_actions": allowed_actions_list,
         "prompt_mode": prompt_mode,
     })
 
@@ -410,7 +450,7 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         })
 
     candidates = canonicalize_candidates(raw_candidates)
-    allowed_actions = set(example.allowed_actions())
+    allowed_actions = set(allowed_actions_list)
     filtered_candidates: list[dict[str, Any]] = []
     for candidate in candidates:
         action = str(candidate.get("action", "")).upper()
@@ -444,7 +484,7 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
             "issue": "invalid_missing_answer",
             "detail": "ANSWER missing after allowed-action/schema filtering.",
         })
-    if not single_action_prompt and len(valid_candidate_list) < 2:
+    if not single_action_prompt and len(valid_candidate_list) < required_min_candidates:
         diagnostics.append({
             "example_id": example.example_id,
             "issue": "invalid_single_action",
@@ -537,6 +577,9 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
         "question": example.question,
         "gold_answer": example.gold_answer,
         "metadata": example.metadata,
+        "allowed_actions": allowed_actions_list,
+        "effective_top_k": top_k_actions,
+        "required_min_candidates": required_min_candidates,
         "prompt": prompt_text,
         "reason_prefix": reason_prefix,
         "reasoning_attempt": policy_output.reasoning_attempt,

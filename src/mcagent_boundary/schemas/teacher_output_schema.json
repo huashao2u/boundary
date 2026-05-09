@@ -64,6 +64,12 @@
           "payload_answer_type": {
             "type": "string"
           },
+          "payload_semantic_type": {
+            "type": "string"
+          },
+          "payload_matches_action_type": {
+            "type": "boolean"
+          },
           "payload_answer_correct": {
             "type": "boolean"
           },
@@ -76,6 +82,9 @@
           "expression": {
             "type": "string"
           },
+          "expression_parse_ok": {
+            "type": "boolean"
+          },
           "expression_relevance": {
             "type": "string"
           },
@@ -86,6 +95,18 @@
             "type": "boolean"
           },
           "targets_critical_slot": {
+            "type": "boolean"
+          },
+          "clarification_possible": {
+            "type": "boolean"
+          },
+          "search_possible": {
+            "type": "boolean"
+          },
+          "action_correctness": {
+            "type": "boolean"
+          },
+          "behavioral_correctness": {
             "type": "boolean"
           },
           "evidence_summary": {

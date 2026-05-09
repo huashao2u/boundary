@@ -125,6 +125,7 @@ def _rule_fallback_candidate_evidence(
             candidate,
             gold_answer=record.get("gold_answer"),
             dataset=str(record.get("dataset", "")),
+            metadata=dict((record.get("metadata") or {})),
         )
         evidence = {
             "rank": candidate.get("rank"),
@@ -334,6 +335,8 @@ def _validate_teacher_payload(
             if not allow_score_fallback:
                 raise ValueError(f"teacher_missing_candidate_evidence rank={rank} action={action}")
             entry = fallback_evidence.get(key) or {"rank": rank, "action": action, "evidence_summary": ""}
+        else:
+            entry = {**(fallback_evidence.get(key) or {}), **entry}
         candidate_evidence.append(entry)
 
     raw_reflection = payload.get("candidate_reflection") or []
@@ -504,6 +507,7 @@ def _label_one_record(
         student_candidates_for_prompt,
         gold_answer=record.get("gold_answer"),
         dataset=str(record.get("dataset", "")),
+        metadata=dict((record.get("metadata") or {})),
     )
 
     dataset_boundary = json.dumps(
@@ -629,6 +633,13 @@ def _label_one_record(
             "dataset": record["dataset"],
             "boundary_type": record["boundary_type"],
             "question": record["question"],
+            "gold_answer": record.get("gold_answer"),
+            "metadata": record.get("metadata") or {},
+            "gold_reference": {
+                "gold_answer": record.get("gold_answer"),
+                "should_refuse": (record.get("metadata") or {}).get("should_refuse"),
+                "or_bench_label": (record.get("metadata") or {}).get("or_bench_label"),
+            },
             "source": source,
             "teacher_provider": client.provider,
             "teacher_model": client.model,

@@ -15,6 +15,11 @@ from mcagent_boundary.io import read_jsonl, write_jsonl
 
 ERROR_TYPES = [
     "none",
+    "answer_contains_clarify",
+    "answer_contains_refusal",
+    "answer_mentions_tool_unavailable",
+    "answer_has_unit",
+    "payload_action_mismatch",
     "wrong_answer_payload_high_score",
     "correct_calculate_low_score",
     "answer_is_expression",
@@ -24,6 +29,7 @@ ERROR_TYPES = [
     "bad_search_query_high_score",
     "bad_clarify_question_high_score",
     "unsafe_answer_high_score",
+    "answer_shell_refusal",
     "pairwise_disagreement",
 ]
 
@@ -133,6 +139,9 @@ def _label_config_xml() -> str:
     <Text name="question" value="$question"/>
     <Header value="Gold / Reference"/>
     <Text name="gold_answer" value="$gold_answer"/>
+    <Text name="allowed_actions" value="Allowed actions: $allowed_actions_json | effective_top_k: $effective_top_k"/>
+    <Header value="Metadata"/>
+    <Text name="metadata_json" value="$metadata_json"/>
   </View>
 
   <View className="block">
@@ -215,6 +224,11 @@ def _task_from_pair(
         "review_focus": ", ".join(focus) if focus else "general",
         "question": (rollout or {}).get("question") or _question_from_prompt(pair.get("prompt", "")),
         "gold_answer": (rollout or {}).get("gold_answer", ""),
+        "metadata": (rollout or {}).get("metadata") or (teacher_label or {}).get("metadata") or {},
+        "metadata_json": _json_dumps((rollout or {}).get("metadata") or (teacher_label or {}).get("metadata") or {}),
+        "allowed_actions": (rollout or {}).get("allowed_actions") or [],
+        "allowed_actions_json": _json_dumps((rollout or {}).get("allowed_actions") or []),
+        "effective_top_k": (rollout or {}).get("effective_top_k", ""),
         "student_reasoning_attempt": (rollout or {}).get("reasoning_attempt")
         or (rollout or {}).get("reason_prefix", ""),
         "uncertainty_summary": (rollout or {}).get("uncertainty_summary", ""),
@@ -222,9 +236,12 @@ def _task_from_pair(
         "teacher_recommended_action": (teacher_label or {}).get("recommended_action", ""),
         "teacher_rationale": (teacher_label or {}).get("rationale", ""),
         "teacher_candidate_evidence_json": _json_dumps((teacher_label or {}).get("candidate_evidence") or []),
+        "candidate_evidence": (teacher_label or {}).get("candidate_evidence") or [],
         "teacher_candidate_utility_json": _json_dumps((teacher_label or {}).get("candidate_utility") or []),
+        "teacher_utility": (teacher_label or {}).get("candidate_utility") or [],
         "teacher_candidate_reflection_json": _json_dumps((teacher_label or {}).get("candidate_reflection") or []),
         "teacher_guardrail_summary_json": _json_dumps((teacher_label or {}).get("guardrail_summary") or metadata.get("teacher_guardrail_summary") or {}),
+        "guardrail_summary": (teacher_label or {}).get("guardrail_summary") or metadata.get("teacher_guardrail_summary") or {},
         "teacher_semantic_tags_json": _json_dumps((teacher_label or {}).get("semantic_tags") or metadata.get("active_semantic_tags") or []),
         "chosen_action": pair.get("chosen_action", ""),
         "rejected_action": pair.get("rejected_action", ""),
@@ -232,7 +249,9 @@ def _task_from_pair(
         "chosen_text": pair.get("chosen", ""),
         "rejected_text": pair.get("rejected", ""),
         "chosen_candidate_json": _json_dumps(chosen_candidate or {"evidence": chosen_ev}),
+        "chosen": chosen_candidate or {"evidence": chosen_ev},
         "rejected_candidate_json": _json_dumps(rejected_candidate or {"evidence": rejected_ev}),
+        "rejected": rejected_candidate or {"evidence": rejected_ev},
         "pair_metadata_json": _json_dumps(metadata),
     }
     return {"data": data}
