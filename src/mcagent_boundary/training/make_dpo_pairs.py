@@ -13,10 +13,14 @@ import re
 from hashlib import sha1
 from typing import Any, Iterable, Literal
 
+from mcagent_boundary.annotation.validate_teacher_evidence import apply_evidence_score_guardrail
 from mcagent_boundary.prompting.action_decision import (
     build_action_decision_completion,
     build_action_decision_prompt_messages,
     build_action_decision_prompt_text,
+    build_decision_window_completion,
+    build_decision_window_prompt_messages,
+    build_decision_window_prompt_text,
 )
 from mcagent_boundary.rollout.candidate_schema import (
     is_valid_candidate,
@@ -53,8 +57,26 @@ _REFLECTION_MARKER_REPLACEMENTS = {
 # Prompt / completion rendering
 # ---------------------------------------------------------------------------
 
-def _build_prompt_messages(record: dict[str, Any]) -> list[dict[str, str]]:
+def _pair_prompt_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("pair_construction", {}).get("prompt_mode", "decision_window")).lower()
+    if mode in {"end_to_end", "single_action", "full"}:
+        return "end_to_end"
+    return "decision_window"
+
+
+def _record_reasoning_attempt(record: dict[str, Any]) -> str:
+    return str(record.get("reasoning_attempt") or record.get("reason_prefix") or "").strip()
+
+
+def _build_prompt_messages(record: dict[str, Any], config: dict[str, Any]) -> list[dict[str, str]]:
     """Build the same single-action prompt used by eval."""
+    if _pair_prompt_mode(config) == "decision_window":
+        return build_decision_window_prompt_messages(
+            question=record["question"],
+            allowed_actions=_allowed_actions_from_record(record),
+            reasoning_attempt=_record_reasoning_attempt(record),
+            can_clarify=_record_can_clarify(record),
+        )
     return build_action_decision_prompt_messages(
         question=record["question"],
         allowed_actions=_allowed_actions_from_record(record),
@@ -167,10 +189,19 @@ def _candidate_teacher_entry(
 def _build_completion_messages(
     branch: dict[str, Any],
     teacher_label: dict[str, Any] | None,
+    config: dict[str, Any],
     role_label: Literal["chosen", "rejected"] = "chosen",
 ) -> list[dict[str, str]]:
     """Build completion messages truncated at action emission (no tool obs/finalize)."""
     reflection = _reflection_for_role(branch, teacher_label, role_label)
+    if _pair_prompt_mode(config) == "decision_window":
+        completion = build_decision_window_completion(
+            action=branch["action"],
+            action_input=branch.get("canonical_action_input") or branch.get("action_input", {}),
+            confidence=branch.get("confidence"),
+            brief_rationale=reflection,
+        )
+        return [{"role": "assistant", "content": completion}]
     # action_input from the candidate — guaranteed no gold injection by branch_actions.py
     completion = build_action_decision_completion(
         action=branch["action"],
@@ -183,8 +214,15 @@ def _build_completion_messages(
     return [{"role": "assistant", "content": completion}]
 
 
-def _render_prompt_text(record: dict[str, Any]) -> str:
+def _render_prompt_text(record: dict[str, Any], config: dict[str, Any]) -> str:
     """Legacy flat-text prompt for backward compat / debugging."""
+    if _pair_prompt_mode(config) == "decision_window":
+        return build_decision_window_prompt_text(
+            question=record["question"],
+            allowed_actions=_allowed_actions_from_record(record),
+            reasoning_attempt=_record_reasoning_attempt(record),
+            can_clarify=_record_can_clarify(record),
+        )
     return build_action_decision_prompt_text(
         question=record["question"],
         allowed_actions=_allowed_actions_from_record(record),
@@ -195,10 +233,18 @@ def _render_prompt_text(record: dict[str, Any]) -> str:
 def _render_completion_text(
     branch: dict[str, Any],
     teacher_label: dict[str, Any] | None,
+    config: dict[str, Any],
     role_label: Literal["chosen", "rejected"] = "chosen",
 ) -> str:
     """Legacy flat-text completion for backward compat / debugging."""
     reflection = _reflection_for_role(branch, teacher_label, role_label)
+    if _pair_prompt_mode(config) == "decision_window":
+        return build_decision_window_completion(
+            action=branch["action"],
+            action_input=branch.get("canonical_action_input") or branch.get("action_input", {}),
+            confidence=branch.get("confidence"),
+            brief_rationale=reflection,
+        )
     return build_action_decision_completion(
         action=branch["action"],
         action_input=branch.get("canonical_action_input") or branch.get("action_input", {}),
@@ -293,6 +339,128 @@ def _score_candidates(
 # Pair selection
 # ---------------------------------------------------------------------------
 
+def _pair_augmentation_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    cfg = config.get("pair_construction", {}).get("augmentation", {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def pair_augmentation_enabled(config: dict[str, Any]) -> bool:
+    cfg = _pair_augmentation_cfg(config)
+    return bool(cfg.get("enabled", False))
+
+
+def _stable_sort_key(record: dict[str, Any], kind: str) -> str:
+    state_id = str(record.get("state_id", ""))
+    return sha1(f"{kind}:{state_id}".encode("utf-8")).hexdigest()
+
+
+def _ranked_chosen_candidates(scored_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        [candidate for candidate in scored_candidates if valid_as_chosen(candidate)],
+        key=lambda candidate: candidate["u_rel"],
+        reverse=True,
+    )
+
+
+def _select_augmented_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    max_pairs: int,
+    dataset_quota: dict[str, Any] | None = None,
+    fill_remaining: bool = True,
+) -> list[dict[str, Any]]:
+    if max_pairs <= 0 or not candidates:
+        return []
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[int] = set()
+    quotas: dict[str, int] = {}
+    for dataset, value in (dataset_quota or {}).items():
+        try:
+            quotas[str(dataset)] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+
+    for dataset, quota in quotas.items():
+        if quota <= 0:
+            continue
+        for idx, candidate in enumerate(candidates):
+            if len(selected) >= max_pairs:
+                break
+            if idx in selected_ids or str(candidate["record"].get("dataset")) != dataset:
+                continue
+            selected.append(candidate)
+            selected_ids.add(idx)
+            quota -= 1
+            if quota <= 0:
+                break
+
+    if fill_remaining:
+        for idx, candidate in enumerate(candidates):
+            if len(selected) >= max_pairs:
+                break
+            if idx in selected_ids:
+                continue
+            selected.append(candidate)
+            selected_ids.add(idx)
+    return selected
+
+
+def _action_pair(pair: dict[str, Any]) -> str:
+    chosen = str(pair.get("chosen_action", "UNKNOWN")).upper()
+    rejected = str(pair.get("rejected_action", "UNKNOWN")).upper()
+    return f"{chosen}>{rejected}"
+
+
+def _post_filter_pair_quota(
+    pairs: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    post_filter = config.get("pair_construction", {}).get("post_filter", {})
+    if not isinstance(post_filter, dict) or not bool(post_filter.get("enabled", False)):
+        return pairs
+    quota_cfg = post_filter.get("action_pair_quota_by_dataset") or {}
+    if not isinstance(quota_cfg, dict) or not quota_cfg:
+        return pairs
+
+    selected: list[dict[str, Any]] = []
+    buckets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for pair in pairs:
+        dataset = str(pair.get("dataset") or pair.get("metadata", {}).get("dataset") or "unknown")
+        action_pair = _action_pair(pair)
+        dataset_quota = quota_cfg.get(dataset) or {}
+        if not isinstance(dataset_quota, dict) or action_pair not in dataset_quota:
+            selected.append(pair)
+            continue
+        buckets.setdefault((dataset, action_pair), []).append(pair)
+
+    for (dataset, action_pair), bucket_pairs in sorted(buckets.items()):
+        try:
+            limit = max(0, int((quota_cfg.get(dataset) or {}).get(action_pair, len(bucket_pairs))))
+        except (TypeError, ValueError):
+            limit = len(bucket_pairs)
+        if limit >= len(bucket_pairs):
+            selected.extend(bucket_pairs)
+            continue
+        bucket_pairs = sorted(
+            bucket_pairs,
+            key=lambda pair: (
+                str(pair.get("pair_kind") or pair.get("metadata", {}).get("pair_kind") or "strong"),
+                str(pair.get("pair_id") or pair.get("metadata", {}).get("pair_id") or pair.get("state_id", "")),
+            ),
+        )
+        selected.extend(bucket_pairs[:limit])
+
+    return sorted(
+        selected,
+        key=lambda pair: (
+            str(pair.get("dataset") or pair.get("metadata", {}).get("dataset") or ""),
+            str(pair.get("state_id") or pair.get("metadata", {}).get("state_id") or ""),
+            str(pair.get("pair_kind") or pair.get("metadata", {}).get("pair_kind") or "strong"),
+            str(pair.get("pair_id") or pair.get("metadata", {}).get("pair_id") or ""),
+        ),
+    )
+
+
 def _pick_chosen_rejected(
     scored_candidates: list[dict[str, Any]],
     teacher_label: dict[str, Any] | None,
@@ -329,6 +497,168 @@ def _pick_chosen_rejected(
         return chosen, candidate
 
     return None
+
+
+def _near_tie_pair_candidate(
+    record: dict[str, Any],
+    scored: list[dict[str, Any]],
+    teacher_label: dict[str, Any] | None,
+    cfg: dict[str, Any],
+) -> dict[str, Any] | None:
+    if bool(teacher_label and teacher_label.get("rubric_degenerate", False)):
+        return None
+    ranked = _ranked_chosen_candidates(scored)
+    if len(ranked) < 2:
+        return None
+    chosen, rejected = ranked[0], ranked[1]
+    if bool(cfg.get("require_different_action_types", True)) and chosen["action"] == rejected["action"]:
+        return None
+    gap = float(chosen["u_rel"] - rejected["u_rel"])
+    max_gap = float(cfg.get("max_gap", 0.20))
+    primary_min_gap = float(cfg.get("primary_min_gap", cfg.get("min_gap", 0.10)))
+    fallback_min_gap = float(cfg.get("fallback_min_gap", primary_min_gap))
+    if gap < fallback_min_gap or gap > max_gap:
+        return None
+    tier = "primary" if gap >= primary_min_gap else "fallback"
+    return {
+        "record": record,
+        "teacher_label": teacher_label,
+        "chosen": chosen,
+        "rejected": rejected,
+        "gap": gap,
+        "tier": tier,
+        "sort_gap": gap,
+        "sort_key": _stable_sort_key(record, "near_tie"),
+    }
+
+
+def _best_mid_pair_candidate(
+    record: dict[str, Any],
+    scored: list[dict[str, Any]],
+    teacher_label: dict[str, Any] | None,
+    cfg: dict[str, Any],
+) -> dict[str, Any] | None:
+    if bool(teacher_label and teacher_label.get("rubric_degenerate", False)):
+        return None
+    ranked = _ranked_chosen_candidates(scored)
+    if len(ranked) < 3:
+        return None
+    chosen, rejected = ranked[0], ranked[1]
+    if bool(cfg.get("require_different_action_types", True)) and chosen["action"] == rejected["action"]:
+        return None
+    gap = float(chosen["u_rel"] - rejected["u_rel"])
+    if gap < float(cfg.get("min_gap", 0.10)):
+        return None
+    return {
+        "record": record,
+        "teacher_label": teacher_label,
+        "chosen": chosen,
+        "rejected": rejected,
+        "gap": gap,
+        "tier": "best_mid",
+        "sort_gap": gap,
+        "sort_key": _stable_sort_key(record, "best_mid"),
+    }
+
+
+def _make_dpo_pair(
+    record: dict[str, Any],
+    teacher_label: dict[str, Any] | None,
+    config: dict[str, Any],
+    chosen_cand: dict[str, Any],
+    rejected_cand: dict[str, Any],
+    *,
+    min_utility_gap: float,
+    pair_kind: str,
+    sample_weight: float,
+    augmentation_tier: str | None = None,
+) -> dict[str, Any]:
+    state_id = str(record.get("state_id", ""))
+    prompt_mode = _pair_prompt_mode(config)
+    prompt_messages = _build_prompt_messages(record, config)
+    chosen_messages = _build_completion_messages(chosen_cand, teacher_label, config, role_label="chosen")
+    rejected_messages = _build_completion_messages(rejected_cand, teacher_label, config, role_label="rejected")
+    selection_gap = round(float(chosen_cand["u_rel"] - rejected_cand["u_rel"]), 6)
+    pair_id = sha1(
+        (
+            f"{state_id}:{pair_kind}:"
+            f"{chosen_cand.get('rank')}:{chosen_cand.get('action')}:"
+            f"{rejected_cand.get('rank')}:{rejected_cand.get('action')}"
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "pair_id": pair_id,
+        "state_id": state_id,
+        "example_id": record["example_id"],
+        "dataset": record["dataset"],
+        "boundary_type": record["boundary_type"],
+        "pool": record.get("pool", "boundary_critical"),
+        "pair_kind": pair_kind,
+        "sample_weight": float(sample_weight),
+        "prompt_messages": prompt_messages,
+        "chosen_messages": chosen_messages,
+        "rejected_messages": rejected_messages,
+        "prompt": _render_prompt_text(record, config),
+        "chosen": _render_completion_text(chosen_cand, teacher_label, config, role_label="chosen"),
+        "rejected": _render_completion_text(rejected_cand, teacher_label, config, role_label="rejected"),
+        "chosen_action": chosen_cand["action"],
+        "rejected_action": rejected_cand["action"],
+        "chosen_candidate": {
+            **chosen_cand,
+            "teacher_evidence": _candidate_teacher_entry(
+                teacher_label,
+                chosen_cand,
+                field="candidate_evidence",
+            ),
+        },
+        "rejected_candidate": {
+            **rejected_cand,
+            "teacher_evidence": _candidate_teacher_entry(
+                teacher_label,
+                rejected_cand,
+                field="candidate_evidence",
+            ),
+        },
+        "metadata": {
+            "dataset": record["dataset"],
+            "boundary_type": record["boundary_type"],
+            "delta_u_rel": selection_gap,
+            "chosen_u_rel": chosen_cand["u_rel"],
+            "rejected_u_rel": rejected_cand["u_rel"],
+            "state_id": state_id,
+            "pair_id": pair_id,
+            "pair_kind": pair_kind,
+            "sample_weight": float(sample_weight),
+            "augmentation_tier": augmentation_tier,
+            "teacher_source": None if teacher_label is None else teacher_label.get("source"),
+            "prompt_mode": prompt_mode,
+            "state_reasoning_attempt": _record_reasoning_attempt(record),
+            "chosen_valid_candidate": True,
+            "rejected_valid_candidate": bool(is_valid_candidate(rejected_cand)),
+            "rejected_candidate_status": rejected_cand.get("candidate_status"),
+            "rejected_valid_for_chosen": bool(valid_as_chosen(rejected_cand)),
+            "rejected_valid_for_rejected": bool(valid_as_rejected(rejected_cand)),
+            "min_utility_gap": min_utility_gap,
+            "chosen_schema_diagnostics": chosen_cand.get("schema_diagnostics", []),
+            "rejected_schema_diagnostics": rejected_cand.get("schema_diagnostics", []),
+            "active_semantic_tags": record.get("active_semantic_tags", []),
+            "semantic_tag_evidence": record.get("semantic_tag_evidence", {}),
+            "process_features": record.get("process_features", {}),
+            "teacher_guardrail_summary": None
+            if teacher_label is None
+            else teacher_label.get("guardrail_summary", {}),
+            "chosen_candidate_evidence": _candidate_teacher_entry(
+                teacher_label,
+                chosen_cand,
+                field="candidate_evidence",
+            ),
+            "rejected_candidate_evidence": _candidate_teacher_entry(
+                teacher_label,
+                rejected_cand,
+                field="candidate_evidence",
+            ),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +787,11 @@ def build_step_dpo_pairs(
     train_pairs: list[dict[str, Any]] = []
     eval_pairs: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
+    augmentation_cfg = _pair_augmentation_cfg(config)
+    near_tie_cfg = dict(augmentation_cfg.get("near_tie") or {})
+    best_mid_cfg = dict(augmentation_cfg.get("best_mid") or {})
+    near_tie_candidates: list[dict[str, Any]] = []
+    best_mid_candidates: list[dict[str, Any]] = []
 
     from mcagent_boundary.progress import make_progress
 
@@ -503,6 +838,12 @@ def build_step_dpo_pairs(
             except Exception:
                 pass
             continue
+        if teacher_label is not None:
+            teacher_label = apply_evidence_score_guardrail(
+                teacher_label,
+                dataset=str(record.get("dataset", "")),
+                record=record,
+            )
         excluded_issues = _excluded_rollout_issues(record)
         if excluded_issues:
             diagnostics.append({
@@ -580,6 +921,10 @@ def build_step_dpo_pairs(
             require_different_action_types=require_different_action_types,
         )
         if pair is None:
+            if pair_augmentation_enabled(config) and bool(near_tie_cfg.get("enabled", False)):
+                near_tie = _near_tie_pair_candidate(record, scored, teacher_label, near_tie_cfg)
+                if near_tie is not None:
+                    near_tie_candidates.append(near_tie)
             diagnostics.append({
                 **diagnostic_base,
                 "reason": "no_valid_pair_after_schema_filter",
@@ -597,78 +942,24 @@ def build_step_dpo_pairs(
             continue
 
         chosen_cand, rejected_cand = pair
-        prompt_messages = _build_prompt_messages(record)
-        chosen_messages = _build_completion_messages(chosen_cand, teacher_label, role_label="chosen")
-        rejected_messages = _build_completion_messages(rejected_cand, teacher_label, role_label="rejected")
-
-        dpo_pair = {
-            "state_id": state_id,
-            "example_id": record["example_id"],
-            "dataset": record["dataset"],
-            "boundary_type": record["boundary_type"],
-            "pool": record.get("pool", "boundary_critical"),
-            "prompt_messages": prompt_messages,
-            "chosen_messages": chosen_messages,
-            "rejected_messages": rejected_messages,
-            "prompt": _render_prompt_text(record),
-            "chosen": _render_completion_text(chosen_cand, teacher_label, role_label="chosen"),
-            "rejected": _render_completion_text(rejected_cand, teacher_label, role_label="rejected"),
-            "chosen_action": chosen_cand["action"],
-            "rejected_action": rejected_cand["action"],
-            "chosen_candidate": {
-                **chosen_cand,
-                "teacher_evidence": _candidate_teacher_entry(
-                    teacher_label,
-                    chosen_cand,
-                    field="candidate_evidence",
-                ),
-            },
-            "rejected_candidate": {
-                **rejected_cand,
-                "teacher_evidence": _candidate_teacher_entry(
-                    teacher_label,
-                    rejected_cand,
-                    field="candidate_evidence",
-                ),
-            },
-            "metadata": {
-                "dataset": record["dataset"],
-                "boundary_type": record["boundary_type"],
-                "delta_u_rel": round(chosen_cand["u_rel"] - rejected_cand["u_rel"], 6),
-                "chosen_u_rel": chosen_cand["u_rel"],
-                "rejected_u_rel": rejected_cand["u_rel"],
-                "state_id": state_id,
-                "teacher_source": None if teacher_label is None else teacher_label.get("source"),
-                "chosen_valid_candidate": True,
-                "rejected_valid_candidate": bool(is_valid_candidate(rejected_cand)),
-                "rejected_candidate_status": rejected_cand.get("candidate_status"),
-                "rejected_valid_for_chosen": bool(valid_as_chosen(rejected_cand)),
-                "rejected_valid_for_rejected": bool(valid_as_rejected(rejected_cand)),
-                "min_utility_gap": min_utility_gap,
-                "chosen_schema_diagnostics": chosen_cand.get("schema_diagnostics", []),
-                "rejected_schema_diagnostics": rejected_cand.get("schema_diagnostics", []),
-                "active_semantic_tags": record.get("active_semantic_tags", []),
-                "semantic_tag_evidence": record.get("semantic_tag_evidence", {}),
-                "process_features": record.get("process_features", {}),
-                "teacher_guardrail_summary": None
-                if teacher_label is None
-                else teacher_label.get("guardrail_summary", {}),
-                "chosen_candidate_evidence": _candidate_teacher_entry(
-                    teacher_label,
-                    chosen_cand,
-                    field="candidate_evidence",
-                ),
-                "rejected_candidate_evidence": _candidate_teacher_entry(
-                    teacher_label,
-                    rejected_cand,
-                    field="candidate_evidence",
-                ),
-            },
-        }
+        dpo_pair = _make_dpo_pair(
+            record,
+            teacher_label,
+            config,
+            chosen_cand,
+            rejected_cand,
+            min_utility_gap=min_utility_gap,
+            pair_kind="strong",
+            sample_weight=1.0,
+        )
         if _assign_split(record, eval_datasets) == "eval":
             eval_pairs.append(dpo_pair)
         else:
             train_pairs.append(dpo_pair)
+        if pair_augmentation_enabled(config) and bool(best_mid_cfg.get("enabled", False)):
+            best_mid = _best_mid_pair_candidate(record, scored, teacher_label, best_mid_cfg)
+            if best_mid is not None:
+                best_mid_candidates.append(best_mid)
         counters["produced"] = len(train_pairs) + len(eval_pairs)
         counters["dropped"] = len(diagnostics)
         try:
@@ -680,6 +971,75 @@ def build_step_dpo_pairs(
         progress.close()
     except Exception:
         pass
+
+    if pair_augmentation_enabled(config):
+        augmented_pairs: list[dict[str, Any]] = []
+        if bool(near_tie_cfg.get("enabled", False)):
+            near_tie_candidates.sort(
+                key=lambda item: (
+                    0 if item.get("tier") == "primary" else 1,
+                    -float(item["sort_gap"]),
+                    item["sort_key"],
+                )
+            )
+            selected_near_tie = _select_augmented_candidates(
+                near_tie_candidates,
+                max_pairs=int(near_tie_cfg.get("max_pairs", 0)),
+                dataset_quota=near_tie_cfg.get("dataset_quota") or {},
+                fill_remaining=bool(near_tie_cfg.get("fill_remaining", True)),
+            )
+            for item in selected_near_tie:
+                augmented_pairs.append(_make_dpo_pair(
+                    item["record"],
+                    item["teacher_label"],
+                    config,
+                    item["chosen"],
+                    item["rejected"],
+                    min_utility_gap=float(item["gap"]),
+                    pair_kind="near_tie",
+                    sample_weight=float(near_tie_cfg.get("sample_weight", 0.4)),
+                    augmentation_tier=str(item.get("tier") or "near_tie"),
+                ))
+        if bool(best_mid_cfg.get("enabled", False)):
+            best_mid_candidates.sort(
+                key=lambda item: (
+                    -float(item["sort_gap"]),
+                    item["sort_key"],
+                )
+            )
+            selected_best_mid = _select_augmented_candidates(
+                best_mid_candidates,
+                max_pairs=int(best_mid_cfg.get("max_pairs", 0)),
+                dataset_quota=best_mid_cfg.get("dataset_quota") or {},
+                fill_remaining=bool(best_mid_cfg.get("fill_remaining", True)),
+            )
+            for item in selected_best_mid:
+                augmented_pairs.append(_make_dpo_pair(
+                    item["record"],
+                    item["teacher_label"],
+                    config,
+                    item["chosen"],
+                    item["rejected"],
+                    min_utility_gap=float(item["gap"]),
+                    pair_kind="best_mid",
+                    sample_weight=float(best_mid_cfg.get("sample_weight", 0.7)),
+                    augmentation_tier=str(item.get("tier") or "best_mid"),
+                ))
+        for dpo_pair in augmented_pairs:
+            if _assign_split(dpo_pair, eval_datasets) == "eval":
+                eval_pairs.append(dpo_pair)
+            else:
+                train_pairs.append(dpo_pair)
+
+    all_pairs = _post_filter_pair_quota(train_pairs + eval_pairs, config)
+    train_pairs = []
+    eval_pairs = []
+    for dpo_pair in all_pairs:
+        if _assign_split(dpo_pair, eval_datasets) == "eval":
+            eval_pairs.append(dpo_pair)
+        else:
+            train_pairs.append(dpo_pair)
+
     counters["produced"] = len(train_pairs) + len(eval_pairs)
     counters["dropped"] = len(diagnostics)
     logger.info(

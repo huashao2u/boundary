@@ -31,7 +31,7 @@ def main() -> None:
     parser.add_argument(
         "--selection-preset",
         default="none",
-        choices=["none", "v023_full_rollout"],
+        choices=["none", "v023_full_rollout", "v026_full_rollout"],
         help="Apply a named post-load dataset selection plan.",
     )
     parser.add_argument(

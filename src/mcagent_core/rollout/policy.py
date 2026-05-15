@@ -150,7 +150,9 @@ def _build_finalize_prompt(sample, decision: dict[str, Any], observation: dict[s
         f"Action taken: {decision.get('action')}\n"
         f"Action input: {json.dumps(decision.get('action_input', {}), ensure_ascii=False)}\n"
         f"Tool observation: {json.dumps(observation, ensure_ascii=False)}\n\n"
-        "Return JSON: {\"final_decision\":{\"action\":\"ANSWER|REFUSE\","
+        "If another tool action is strictly necessary, return SEARCH, CALCULATE, or CLARIFY with the required action_input.\n"
+        "For CALCULATE, action_input.expression must be a restricted Python math snippet whose printed output is the answer.\n\n"
+        "Return JSON: {\"final_decision\":{\"action\":\"ANSWER|SEARCH|CALCULATE|CLARIFY|REFUSE\","
         "\"confidence\":0.0,\"action_input\":{},\"brief_rationale\":\"\"}}"
     )
 
@@ -195,11 +197,25 @@ def _parse_finalize_output(raw_text: str, *, default_action: str) -> dict[str, s
         action_input = {}
     if action == "ANSWER":
         answer = action_input.get("answer") or action_input.get("final_answer") or action_input.get("response") or ""
-        return {"final_answer": str(answer), "final_status": "answered_after_tool", "raw_finalize_text": raw_text}
+        return {
+            "action": action,
+            "action_input": action_input,
+            "final_answer": str(answer),
+            "final_status": "answered_after_tool",
+            "raw_finalize_text": raw_text,
+        }
     if action == "REFUSE":
         reason = action_input.get("reason") or action_input.get("explanation") or final_decision.get("brief_rationale") or ""
-        return {"final_answer": str(reason), "final_status": "refused_after_tool", "raw_finalize_text": raw_text}
+        return {
+            "action": action,
+            "action_input": action_input,
+            "final_answer": str(reason),
+            "final_status": "refused_after_tool",
+            "raw_finalize_text": raw_text,
+        }
     return {
+        "action": action,
+        "action_input": action_input,
         "final_answer": json.dumps(action_input, ensure_ascii=False),
         "final_status": f"needs_additional_{action.lower()}",
         "raw_finalize_text": raw_text,

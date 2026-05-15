@@ -15,7 +15,7 @@ class BoundarySandbox:
         self.history: list[dict[str, Any]] = []
         self.tools = {
             "SEARCH": SearchTool(config=config, phase=phase),
-            "CALCULATE": CalculatorTool(),
+            "CALCULATE": CalculatorTool(config=config, phase=phase),
             "CLARIFY": ClarifyOracle(),
             "REFUSE": RefuseTool(),
         }

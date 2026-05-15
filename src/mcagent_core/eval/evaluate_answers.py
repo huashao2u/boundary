@@ -3,26 +3,53 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 from mcagent_core.utils.io import read_jsonl, write_json
 
 
-NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
+NUMBER_PATTERN = re.compile(r"[-+]?\$?\d[\d,]*(?:\.\d+)?(?:/\d[\d,]*)?")
 
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+def _normalize_numeric(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip().replace("$", "").replace(",", "")
+    if not cleaned:
+        return None
+    try:
+        if "/" in cleaned and not cleaned.startswith(("http://", "https://")):
+            fraction = Fraction(cleaned)
+            decimal = Decimal(fraction.numerator) / Decimal(fraction.denominator)
+        else:
+            decimal = Decimal(cleaned)
+    except (InvalidOperation, ValueError, ZeroDivisionError):
+        return cleaned.lower()
+    normalized = decimal.normalize()
+    if normalized == normalized.to_integral_value():
+        return str(normalized.quantize(Decimal(1)))
+    return format(normalized, "f").rstrip("0").rstrip(".")
+
+
 def extract_math_final_answer(text: str) -> str:
     if not text:
         return ""
     if "####" in text:
-        return text.split("####")[-1].strip()
-    numbers = NUMBER_PATTERN.findall(text)
-    return numbers[-1] if numbers else text.strip()
+        text = text.split("####")[-1]
+    boxed = re.findall(r"\\boxed\{([^{}]+)\}", text)
+    if boxed:
+        text = boxed[-1]
+    numbers = NUMBER_PATTERN.findall(str(text))
+    if numbers:
+        return _normalize_numeric(numbers[-1]) or numbers[-1]
+    return normalize_text(text)
 
 
 def is_answer_correct(sample: dict[str, Any], predicted_answer: str | None) -> bool | None:

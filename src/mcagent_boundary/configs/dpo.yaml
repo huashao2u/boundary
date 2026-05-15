@@ -32,7 +32,7 @@ mining:
   competition_window: 0.35
   anchor_margin: 0.5
   max_boundary_candidates: 9000
-  max_clear_answer_anchors: 1740
+  max_clear_answer_anchors: 740
   max_clear_external_anchors: 260
   sampling:
     redistribute_unused: true
@@ -43,11 +43,11 @@ mining:
       mintqa: 3000
       or_bench: 900
     clear_answer_quota_by_dataset:
-      gsm8k: 40
-      math: 80
-      in3: 80
+      gsm8k: 20
+      math: 40
+      in3: 40
       mintqa: 0
-      or_bench: 1540
+      or_bench: 640
     clear_external_quota_by_dataset:
       gsm8k: 25
       math: 25
@@ -95,6 +95,7 @@ training:
   gradient_checkpointing: true
   smoke_max_steps: 2
   report_to: []
+  use_sample_weights: true
   lora:
     enabled: true
     r: 16

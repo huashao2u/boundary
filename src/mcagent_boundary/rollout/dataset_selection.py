@@ -38,6 +38,23 @@ def _take_first(examples: list[Any], limit: int | None) -> list[Any]:
     return list(examples[:limit])
 
 
+def _math_level(item: Any) -> int | None:
+    return _as_int(_metadata(item).get("math_level"))
+
+
+def _take_math_v026(items: list[Any], total: int = 3000, easy_ratio: float = 0.8) -> list[Any]:
+    easy_limit = int(total * easy_ratio)
+    hard_limit = total - easy_limit
+    easy_items = [item for item in items if (_math_level(item) or 99) <= 3]
+    hard_items = [item for item in items if (_math_level(item) or 0) >= 4]
+    selected = _take_first(easy_items, easy_limit) + _take_first(hard_items, hard_limit)
+    if len(selected) < total:
+        selected_ids = {id(item) for item in selected}
+        remainder = [item for item in items if id(item) not in selected_ids]
+        selected.extend(_take_first(remainder, total - len(selected)))
+    return selected
+
+
 def load_fixed_example_ids(path: str | Path) -> set[str]:
     """Load fixed example ids from txt, JSON list, or JSONL records."""
     input_path = Path(path)
@@ -71,7 +88,7 @@ def filter_by_example_ids(examples: list[Any], example_ids: set[str]) -> list[An
 def apply_selection_preset(examples: list[Any], preset: str | None) -> list[Any]:
     if not preset or preset == "none":
         return list(examples)
-    if preset != "v023_full_rollout":
+    if preset not in {"v023_full_rollout", "v026_full_rollout"}:
         raise ValueError(f"Unknown dataset selection preset: {preset}")
 
     by_dataset: dict[str, list[Any]] = {}
@@ -88,12 +105,15 @@ def apply_selection_preset(examples: list[Any], preset: str | None) -> list[Any]
         if dataset == "gsm8k":
             selected_by_dataset[dataset] = _take_first(items, 3000)
         elif dataset == "math":
-            easy_items = [
-                item
-                for item in items
-                if (_as_int(_metadata(item).get("math_level")) or 99) <= 3
-            ]
-            selected_by_dataset[dataset] = _take_first(easy_items, 3000)
+            if preset == "v026_full_rollout":
+                selected_by_dataset[dataset] = _take_math_v026(items, total=3000, easy_ratio=0.8)
+            else:
+                easy_items = [
+                    item
+                    for item in items
+                    if (_math_level(item) or 99) <= 3
+                ]
+                selected_by_dataset[dataset] = _take_first(easy_items, 3000)
         elif dataset == "or_bench":
             benign: list[Any] = []
             hard: list[Any] = []

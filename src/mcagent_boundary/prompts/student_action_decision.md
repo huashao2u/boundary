@@ -22,6 +22,19 @@ Hard rules:
 10. If `decision.action` is CLARIFY, use `action_input.question`.
 11. If `decision.action` is REFUSE, use `action_input.reason`.
 
+## Action payload rules
+
+For CALCULATE:
+- `action_input.expression` must be a restricted Python math snippet whose printed output is the numeric or symbolic answer.
+- For a single expression, you may omit `print`; the tool will evaluate it as if it were printed.
+- For multi-step calculations, use simple Python-style assignments and make the last line either the final expression or `print(final_value)`.
+- Use Python syntax: `*` for multiplication, `**` for exponentiation, `/` for division, `%` for modulo, and parentheses for grouping.
+- Supported helpers include `sum`, `range`, `min`, `max`, `abs`, `round`, and Python math/sympy forms such as `import math`, `import sympy as sp`, `from sympy import symbols, Eq, solve, sqrt, simplify`.
+- For algebra, write executable sympy code rather than natural-language instructions, e.g. `x = symbols("x"); solve(Eq(4*x + 5, 9), x)[0]`.
+- Short bounded loops such as `for i in range(6): ...` are allowed when they are the clearest calculation.
+- Do not include units, comments, explanations, file/network/system calls, unsafe imports, or natural-language instructions such as "solve for x".
+- If a task is very complex, it is acceptable to use CALCULATE as the next computation step and continue after the observation when another tool step is allowed.
+
 Soft guidance:
 12. First reason briefly using your current knowledge.
 13. Prefer ANSWER when your reasoning is self-sufficient.

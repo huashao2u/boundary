@@ -71,7 +71,17 @@ annotation:
 eval:
   execute_tools: true               # eval: execute tools for real
   tool_finalize_pass: true          # run student finalize pass after tool observation
+  tool_finalize_depth: 1            # post-tool finalize passes; >1 enables additional tool actions proposed by finalize
   max_branch_steps: 2
+  prompt_mode: decision_window      # default eval mirrors DPO: question + original reasoning_attempt -> decision
+
+tools:
+  calculator:
+    backend: safe_eval              # training/annotation default; eval overrides below
+    backend_eval: python_sandbox    # eval executes restricted Python math snippets in a child process
+    timeout_sec: 3.0
+    memory_mb: 512
+    output_max_chars: 512
 
 calibration:
   enabled: true
@@ -136,6 +146,7 @@ scoring:
   clarify_unhelpful: -0.1
 
 pair_construction:
+  prompt_mode: decision_window      # default: state-conditioned action alignment; use end_to_end for full reasoning+decision
   min_utility_gap: 0.2              # gap between chosen and rejected U_rel
   min_utility_gap_default: 0.20
   min_utility_gap_by_dataset:
@@ -152,6 +163,43 @@ pair_construction:
     ANSWER: 0.20
   require_different_action_types: true
   truncate_at_action_emission: true  # training pairs end at action emission; no tool obs/finalize
+  augmentation:
+    enabled: true
+    # Add weak decision-window pairs from records that were too close for the
+    # normal hard-gap filter. Primary range is 0.10-0.20; if that is short of
+    # max_pairs, fallback fills from 0.05-0.10 with the same weak weight.
+    near_tie:
+      enabled: true
+      max_pairs: 600
+      primary_min_gap: 0.10
+      fallback_min_gap: 0.05
+      max_gap: 0.20
+      sample_weight: 0.40
+      require_different_action_types: true
+    # Add best-vs-middle pairs from 3-candidate decision windows. IN3 is
+    # intentionally favored; MintQA is excluded because its best-mid pool mostly
+    # reinforces SEARCH > ANSWER rather than the desired ANSWER > SEARCH signal.
+    best_mid:
+      enabled: true
+      max_pairs: 1500
+      min_gap: 0.10
+      sample_weight: 0.70
+      require_different_action_types: true
+      fill_remaining: false
+      dataset_quota:
+        in3: 1000
+  post_filter:
+    enabled: true
+    # Final pair-level quota. Small MintQA buckets are kept, while dominant
+    # search-heavy buckets are capped so MintQA lands near 2k total pairs.
+    action_pair_quota_by_dataset:
+      gsm8k:
+        CALCULATE>ANSWER: 550
+      math:
+        CALCULATE>ANSWER: 515
+      mintqa:
+        SEARCH>REFUSE: 1000
+        SEARCH>ANSWER: 900
   balance:
     dataset_quota:
       gsm8k: 0.15

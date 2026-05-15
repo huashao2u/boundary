@@ -25,7 +25,10 @@ from typing import Any
 from mcagent_boundary.envs.sandbox import BoundarySandbox
 from mcagent_boundary.features.process_features import compute_process_feature_details
 from mcagent_boundary.features.semantic_tags import infer_semantic_tag_details
-from mcagent_boundary.prompting.action_decision import build_action_decision_prompt_text
+from mcagent_boundary.prompting.action_decision import (
+    build_action_decision_prompt_text,
+    build_decision_window_prompt_text,
+)
 from mcagent_boundary.rollout.candidate_schema import (
     canonicalize_candidates,
     valid_candidates,
@@ -52,9 +55,21 @@ def effective_top_k_for_example(example, config: dict[str, Any] | None = None) -
     return max(1, min(config_top_k, allowed_count))
 
 
-def build_student_prompt(example, config: dict[str, Any] | None = None) -> str:
+def build_student_prompt(
+    example,
+    config: dict[str, Any] | None = None,
+    *,
+    reasoning_attempt: str | None = None,
+) -> str:
     """Build the student prompt (v0.2: no dataset/boundary_type leak)."""
     prompt_mode = str((config or {}).get("rollout", {}).get("prompt_mode", "top_k")).lower()
+    if prompt_mode in {"decision_window", "state_conditioned", "state_conditioned_action"}:
+        return build_decision_window_prompt_text(
+            question=example.question,
+            allowed_actions=example.allowed_actions(),
+            reasoning_attempt=str(reasoning_attempt or ""),
+            can_clarify=bool(getattr(example, "can_clarify", False)),
+        )
     if prompt_mode in {"single", "single_action", "action_decision"}:
         return build_action_decision_prompt_text(
             question=example.question,
@@ -209,7 +224,7 @@ def _finalize_after_tool_heuristic(action: str, observation: dict[str, Any]) -> 
     return observation.get("answer"), observation.get("status", "answered")
 
 
-def _run_finalize_pass(policy, sample, candidate: dict[str, Any], observation: dict[str, Any]) -> dict[str, str]:
+def _run_finalize_pass(policy, sample, candidate: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
     """Run student finalize pass after tool observation (eval only)."""
     try:
         finalize_prompt_text = _read_prompt("student_finalize_after_tool.md").strip()
@@ -231,6 +246,64 @@ def _run_finalize_pass(policy, sample, candidate: dict[str, Any], observation: d
     except Exception as exc:
         logger.warning("finalize_after_tool failed for action %s: %s", candidate["action"], exc)
         return {"final_answer": "", "final_status": "finalize_parse_failed", "finalize_error": str(exc)}
+
+
+def _eval_tool_finalize_depth(config: dict[str, Any]) -> int:
+    eval_cfg = config.get("eval", {}) or {}
+    rollout_cfg = config.get("rollout", {}) or {}
+    value = eval_cfg.get("tool_finalize_depth", rollout_cfg.get("tool_finalize_depth", 1))
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _run_tool_finalize_loop(
+    *,
+    sandbox: BoundarySandbox,
+    policy,
+    sample,
+    initial_candidate: dict[str, Any],
+    initial_observation: dict[str, Any],
+    max_depth: int,
+) -> dict[str, Any]:
+    """Run up to max_depth post-tool finalization passes.
+
+    Depth 1 preserves the legacy behavior: one tool observation, one finalize
+    pass. Larger depths allow finalize to emit another tool action, execute it,
+    and finalize again.
+    """
+    candidate = dict(initial_candidate)
+    observation = initial_observation
+    trace: list[dict[str, Any]] = []
+    final_result: dict[str, Any] = {}
+    for step_index in range(max_depth):
+        final_result = _run_finalize_pass(policy, sample, candidate, observation)
+        trace.append({
+            "step": step_index + 1,
+            "action": candidate.get("action"),
+            "action_input": candidate.get("action_input") or {},
+            "observation": observation,
+            "finalize_result": dict(final_result),
+        })
+        status = str(final_result.get("final_status") or "")
+        next_action = str(final_result.get("action") or "").upper()
+        next_input = final_result.get("action_input") or {}
+        if status == "finalize_parse_failed" or next_action in {"ANSWER", "REFUSE", ""}:
+            break
+        if step_index + 1 >= max_depth:
+            break
+        if next_action not in {"SEARCH", "CALCULATE", "CLARIFY"} or not isinstance(next_input, dict):
+            break
+        observation, _done, _info = sandbox.step(next_action, next_input)
+        candidate = {
+            "action": next_action,
+            "action_input": next_input,
+            "brief_rationale": final_result.get("brief_rationale", ""),
+        }
+    final_result["finalize_trace"] = trace
+    final_result["finalize_depth_used"] = len(trace)
+    return final_result
 
 
 def _branch_summary(branch: dict[str, Any]) -> str:
@@ -357,7 +430,14 @@ def _build_eval_branches(
             finalize_decision = None
         else:
             observation, done, info = sandbox.step(action, action_input)
-            finalize_result = _run_finalize_pass(policy, legacy_sample, candidate, observation)
+            finalize_result = _run_tool_finalize_loop(
+                sandbox=sandbox,
+                policy=policy,
+                sample=legacy_sample,
+                initial_candidate=candidate,
+                initial_observation=observation,
+                max_depth=_eval_tool_finalize_depth(config),
+            )
             final_answer = finalize_result.get("final_answer")
             final_status = finalize_result.get("final_status", f"completed_after_{action.lower()}")
             finalize_decision = finalize_result
@@ -393,7 +473,14 @@ def _build_eval_branches(
     return branches
 
 
-def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> dict[str, Any]:
+def rollout_one_example(
+    example,
+    config: dict[str, Any],
+    phase: str,
+    policy,
+    *,
+    reasoning_attempt: str | None = None,
+) -> dict[str, Any]:
     """Rollout a single example using student-proposed top-k candidates.
 
     Returns a rollout record with candidates, state, process features, and
@@ -402,8 +489,15 @@ def rollout_one_example(example, config: dict[str, Any], phase: str, policy) -> 
     """
     rollout_cfg = config.get("rollout", {})
     prompt_mode = str(rollout_cfg.get("prompt_mode", "top_k")).lower()
-    single_action_prompt = prompt_mode in {"single", "single_action", "action_decision"}
-    prompt_text = build_student_prompt(example, config)
+    single_action_prompt = prompt_mode in {
+        "single",
+        "single_action",
+        "action_decision",
+        "decision_window",
+        "state_conditioned",
+        "state_conditioned_action",
+    }
+    prompt_text = build_student_prompt(example, config, reasoning_attempt=reasoning_attempt)
     legacy_sample = example.to_legacy_sample()
     policy_output = policy.generate_decision(legacy_sample, prompt_text)
 

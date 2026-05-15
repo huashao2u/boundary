@@ -1,1 +1,0 @@
-{"state_id": "573d629a3d1804e7e4efd1eb540962b7ca48a7f8", "example_id": "mintqa-train-76", "dataset": "mintqa", "boundary_type": "factual", "reason": "no_valid_pair_after_schema_filter", "rubric_degenerate": false, "n_candidates": 2, "actions": ["ANSWER", "SEARCH"], "u_rels": [0.4, 0.54]}

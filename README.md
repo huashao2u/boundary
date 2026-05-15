@@ -149,10 +149,14 @@ process uncertainty 诊断信号。boundary / anchor 挖掘已拆到 `02b_mine_b
 - `--datasets a,b,c`：覆盖训练数据集列表；默认使用 `rollout.yaml` 中的 `datasets.train`。
 - `--limit-per-dataset N`：每个数据集最多 rollout N 条。
 - `--full-dataset`：忽略 `rollout.limit_per_dataset`，读取全量。
-- `--selection-preset {none,v023_full_rollout}`：应用命名采样方案。
+- `--selection-preset {none,v023_full_rollout,v026_full_rollout}`：应用命名采样方案。`v026_full_rollout`
+  保持 GSM8K 3k、OR-Bench benign 4k + hard/toxic 全量、MintQA/IN3 全量，并在 MATH 3k 中偏向
+  `level<=3`，同时保留一部分 `level4/5`。
 - `--fixed-example-ids PATH`：只对固定 `example_id` 列表执行小规模实验；支持一行一个 id、
   JSON list，或含 `example_id` 字段的 JSONL。
 - `--output-dir DIR`：把 rollout JSONL 写入指定目录。
+- `--resume-existing`：如果 `all_rollouts.jsonl` 已存在，则跳过已完成的 `(dataset, example_id)`，
+  并把新结果增量追加到同一文件；rollout 过程中每条样本完成后都会立即写盘。
 - `--no-progress`：关闭进度条。
 
 主实验推荐 `vllm` 或 `hf`。`heuristic` 会读 gold，是 smoke/debug-only；主配置禁用 heuristic
@@ -292,11 +296,32 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evi
   负例进入 pair，不能作为 chosen。空 `SEARCH` / `CLARIFY` / `CALCULATE` 仍会被过滤。
 - completion reflection 优先使用 teacher 的 `candidate_reflection`，避免在 rejected completion 中写入
   `lower utility` / `rejected` / `worse` 等显式负面 marker。
-- pair 选择仍来自 top-k rollout candidates，但 DPO 样本本身使用
-  `student_action_decision.md` 的单 action JSON schema，与 `07_eval.py` 默认推理 prompt 一致；训练样本只到
-  action emission，不执行 search/calculator/clarify/refuse 工具，也不包含 tool observation/finalize。
+- pair 选择仍来自 top-k rollout candidates，但 DPO 样本默认采用
+  `decision_window`（state-conditioned action alignment）：prompt 使用原系统 prompt、题目、允许动作和
+  rollout 中 student 原始 `reasoning_attempt` 作为固定 state；completion 只补全根级 action JSON
+  `{action, confidence, brief_rationale, action_input}`。训练样本只到 action emission，不执行
+  search/calculator/clarify/refuse 工具，也不包含 tool observation/finalize。
+- 默认启用 pair augmentation，以覆盖更细的 decision-window：
+  - `strong`：原主线 hard-gap pair，`sample_weight=1.0`。
+  - `near_tie`：从未通过 hard-gap filter 的样本中选择最多 600 条 best-vs-second-best
+    弱偏好 pair；优先 `gap=0.10~0.20`，不足时从 `0.05~0.10` 补齐，默认
+    `sample_weight=0.40`。
+  - `best_mid`：从 3-candidate decision window 中额外选择最多 1500 条
+    best-vs-middle pair，默认 `sample_weight=0.70`；配额只保留 IN3
+    (`in3:1000`) 且 `fill_remaining=false`，避免 MintQA best-mid 继续强化
+    `SEARCH > ANSWER`。
+  这些 pair 会在顶层和 `metadata` 中记录 `pair_kind`、`sample_weight`、`pair_id` 和
+  `augmentation_tier`，便于后续训练加权或分组分析。
+- 默认还会执行 pair-level post-filter：MintQA 小桶全部保留，主导的 search-heavy 桶限制为
+  `SEARCH>REFUSE:1000`、`SEARCH>ANSWER:900`，使 MintQA 最终规模约 2k；GSM8K/MATH 保留
+  `ANSWER>CALCULATE` 小桶，只限制 `CALCULATE>ANSWER` 为 `gsm8k:550`、`math:515`，
+  使两个数学数据集合计约 2k，并避免计算工具偏好过度主导。
+- 如需旧的端到端格式（题目 -> `reasoning + decision`），使用 `--prompt-mode end_to_end` 或配置
+  `pair_construction.prompt_mode: end_to_end`。
 - 聚合 pair 之外，会额外写 `by_dataset/<dataset>/train_step_dpo_pairs.jsonl` 和
   `by_dataset/<dataset>/eval_step_dpo_pairs.jsonl`。
+- 如果 `--batch-size` 与默认 augmentation 同时启用，`04_make_pairs.py` 会自动切换为全量构建；
+  因为 `near_tie.max_pairs` 和 `best_mid.dataset_quota` 需要全局排序和配额，不能在 batch 内独立抽样。
 
 参数：
 
@@ -310,6 +335,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evi
   `poe_teacher`，请使用 `--require-teacher-source poe_teacher`。
 - `--teacher-label-file PATH`：覆盖 teacher label JSONL；相对路径在设置了 `--input-dir` 时相对该目录解析。
   例如 relabel 后可传 `--teacher-label-file teacher_labels_self_evidence.jsonl`。
+- `--batch-size N`：流式批处理构建 pair，降低大规模构建时的峰值内存。
+- `--prompt-mode decision_window|end_to_end`：覆盖 DPO prompt/completion 格式；默认
+  `decision_window`。
 - `--no-progress`：关闭进度条。
 
 示例：
@@ -357,8 +385,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/05_optional_warmup.py --run-
 ### `06_train_dpo.py`
 
 读取配置路径中的 `train_step_dpo_pairs.jsonl` / `eval_step_dpo_pairs.jsonl`，运行 TRL DPOTrainer。
-训练入口只把 `prompt_messages/chosen_messages/rejected_messages` 转成 conversational
-`prompt/chosen/rejected` 传给 trainer；flat text 字段仅用于 debug/export。DPO 训练不执行任何工具查询。
+训练入口把 `prompt_messages/chosen_messages/rejected_messages` 转成 conversational
+`prompt/chosen/rejected`，并默认保留每条 pair 的 `sample_weight` 进入 DPO loss；flat text
+字段仅用于 debug/export。`training.use_sample_weights: true` 时，`strong/near_tie/best_mid`
+样本会分别按构建阶段写入的权重更新，DPO 训练不执行任何工具查询。
 
 参数：
 
@@ -371,8 +401,8 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/06_train_dpo.py --smoke
 ### `07_eval.py`
 
 读取 `datasets.eval`，执行 eval-side rollout 和动作/任务/校准指标。默认使用
-`student_action_decision.md` 的单 action prompt（`--prompt-mode single_action`），与 DPO pair 中的
-训练 prompt/completion schema 对齐；如需调试旧 top-k eval，可显式传 `--prompt-mode top_k`。
+`decision_window`，即与 DPO 主线一致：题目 + 允许动作 + 原始 `reasoning_attempt` state -> action
+decision。端到端 single-action eval 可显式传 `--prompt-mode end_to_end` / `single_action`。
 当前 `rollout.yaml` 中 eval 数据集为空；TruthfulQA / RealTimeQA adapter 只是未来扩展 hook。
 
 ```bash

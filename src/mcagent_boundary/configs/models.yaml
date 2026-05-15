@@ -7,7 +7,7 @@ teacher:
   provider: poe
   source_label: llm_teacher
   model_env: POE_TEACHER_MODEL
-  default_model: gpt-4-nano
+  default_model: GPT-5-nano
   api_key_env: POE_API_KEY
   base_url_env: POE_BASE_URL
   chat_completions_env: POE_CHAT_COMPLETIONS_URL

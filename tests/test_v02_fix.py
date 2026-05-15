@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import json
+from collections import Counter
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -25,11 +26,13 @@ from mcagent_boundary.rollout.dataset_selection import (
 from mcagent_boundary.rollout.state import build_state
 from mcagent_boundary.scoring.utility import utility_rel
 from mcagent_boundary.training.make_dpo_pairs import build_step_dpo_pairs
-from mcagent_boundary.training.run_step_dpo import to_message_dpo_row
+from mcagent_boundary.training.run_step_dpo import _weighted_sequence_loss_mean, to_message_dpo_row
 from mcagent_core.features.extract_process_features import extract_process_features
+from mcagent_core.eval.evaluate_answers import is_answer_correct
 from mcagent_core.features.semantic_tags import build_semantic_tag_details_from_state
 from mcagent_core.prompting.build_prompts import parse_candidate_output, parse_decision_output
 from mcagent_core.rollout.policy import PolicyOutput
+from mcagent_core.tools.calculator_tool import CalculatorTool
 
 
 def _tags(question: str, **kwargs):
@@ -272,6 +275,24 @@ class V02FixTests(unittest.TestCase):
         row = to_message_dpo_row(pair)
         self.assertEqual(row["prompt"], pair["prompt_messages"])
         self.assertNotEqual(row["prompt"], pair["prompt"])
+        self.assertEqual(row["sample_weight"], 1.0)
+
+    def test_to_message_dpo_row_preserves_sample_weight(self):
+        pair = {
+            "prompt_messages": [{"role": "user", "content": "Q"}],
+            "chosen_messages": [{"role": "assistant", "content": "A"}],
+            "rejected_messages": [{"role": "assistant", "content": "B"}],
+            "metadata": {"sample_weight": 0.4},
+        }
+        row = to_message_dpo_row(pair)
+        self.assertEqual(row["sample_weight"], 0.4)
+
+    def test_weighted_sequence_loss_mean_normalizes_weights(self):
+        import torch
+
+        losses = torch.tensor([1.0, 3.0])
+        weighted = _weighted_sequence_loss_mean(losses, torch.tensor([1.0, 3.0]))
+        self.assertAlmostEqual(float(weighted), 2.5)
 
     def test_semantic_tags_are_action_specific_and_not_overbroad(self):
         self.assertTrue(_tags("Who is the current CEO of ExampleCo?", metadata={"can_search": True})["TIME_SENSITIVE"])
@@ -418,6 +439,93 @@ class V02FixTests(unittest.TestCase):
         self.assertEqual(scores[(2, "CALCULATE")], 0.8)
         self.assertTrue(guarded["guardrail_summary"]["guardrail_applied"])
 
+    def test_evidence_guardrail_caps_redundant_calculate_when_answer_is_correct(self):
+        label = {
+            "candidate_evidence": [
+                {
+                    "rank": 1,
+                    "action": "ANSWER",
+                    "payload_semantic_type": "direct_answer",
+                    "payload_answer_correct": True,
+                },
+                {
+                    "rank": 2,
+                    "action": "CALCULATE",
+                    "expression_relevance": "direct_final",
+                    "expression_matches_gold": True,
+                },
+            ],
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.8, "reason": "direct correct"},
+                {"rank": 2, "action": "CALCULATE", "score": 1.0, "reason": "also correct"},
+            ],
+        }
+        guarded = apply_evidence_score_guardrail(label, dataset="gsm8k")
+        utilities = {(item["rank"], item["action"]): item for item in guarded["candidate_utility"]}
+        self.assertEqual(utilities[(1, "ANSWER")]["score"], 0.8)
+        self.assertEqual(utilities[(2, "CALCULATE")]["score"], 0.75)
+        self.assertIn(
+            "redundant_calculate_when_answer_correct_score_capped",
+            utilities[(2, "CALCULATE")]["guardrail_reasons"],
+        )
+
+    def test_evidence_guardrail_caps_redundant_clarify_when_answer_is_correct(self):
+        label = {
+            "candidate_evidence": [
+                {
+                    "rank": 1,
+                    "action": "ANSWER",
+                    "payload_semantic_type": "direct_answer",
+                    "payload_answer_correct": True,
+                },
+                {
+                    "rank": 2,
+                    "action": "CLARIFY",
+                    "payload_semantic_type": "clarification_question",
+                    "targets_critical_slot": True,
+                },
+            ],
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.8, "reason": "direct correct"},
+                {"rank": 2, "action": "CLARIFY", "score": 1.0, "reason": "could personalize"},
+            ],
+        }
+        guarded = apply_evidence_score_guardrail(label, dataset="in3")
+        utilities = {(item["rank"], item["action"]): item for item in guarded["candidate_utility"]}
+        self.assertEqual(utilities[(2, "CLARIFY")]["score"], 0.75)
+        self.assertIn(
+            "redundant_clarify_when_answer_correct_score_capped",
+            utilities[(2, "CLARIFY")]["guardrail_reasons"],
+        )
+
+    def test_mintqa_correct_direct_answer_gets_high_score(self):
+        label = {
+            "candidate_evidence": [
+                {
+                    "rank": 1,
+                    "action": "ANSWER",
+                    "payload_semantic_type": "direct_answer",
+                    "payload_answer_correct": True,
+                },
+                {
+                    "rank": 2,
+                    "action": "SEARCH",
+                    "query_specific_and_relevant": True,
+                },
+            ],
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.4, "reason": "teacher underweighted"},
+                {"rank": 2, "action": "SEARCH", "score": 0.8, "reason": "can verify"},
+            ],
+        }
+        guarded = apply_evidence_score_guardrail(label, dataset="mintqa")
+        utilities = {(item["rank"], item["action"]): item for item in guarded["candidate_utility"]}
+        self.assertEqual(utilities[(1, "ANSWER")]["score"], 1.0)
+        self.assertIn(
+            "mintqa_answer_correct_high_score_floored",
+            utilities[(1, "ANSWER")]["guardrail_reasons"],
+        )
+
     def test_payload_semantic_guardrail_caps_answer_shell_refusal(self):
         label = {
             "candidate_evidence": [
@@ -447,6 +555,51 @@ class V02FixTests(unittest.TestCase):
         self.assertEqual(safe_eval_expression("4*x + 5 = 9"), 1.0)
         self.assertEqual(safe_eval_expression("solve（4*x + 5 - 9， x）[0]"), 1.0)
         self.assertIsNone(safe_eval_expression("__import__('os').system('echo nope')"))
+        sample = {"gold_answer": "#### 990", "task_type": "math"}
+        self.assertTrue(is_answer_correct(sample, "990.0"))
+        self.assertTrue(is_answer_correct(sample, "$990.00"))
+
+    def test_calculator_supports_common_safe_math_forms(self):
+        tool = CalculatorTool()
+
+        def calc(expression: str) -> str:
+            observation, _done, _info = tool.run({"expression": expression}, sample={}, history=[])
+            return observation["result"]
+
+        self.assertEqual(calc("16 * (1 + 0.5)^3"), "54")
+        self.assertEqual(calc("sum(range(1, 6)) - 4"), "11")
+        self.assertEqual(calc("sum(2**n for n in range(6))"), "63")
+        self.assertEqual(calc("x + 2*x + 4*x + 8*x = 450"), "30")
+        self.assertEqual(calc("x + 2*x + 4*x + 8*x - 450"), "30")
+        self.assertEqual(calc("solve(Eq(4*x + 5, 9), x)[0]"), "1")
+        self.assertEqual(calc("total_money = 7*1 + 4*5 + 2*10 + 1*20; spent = total_money - 4; spent / 3"), "21")
+        self.assertEqual(calc("regular = 18 * 8 * 5\novertime = 18 * 1.5 * 2 * 5\nprint(regular + overtime)"), "990")
+        with self.assertRaises(ValueError):
+            calc("__import__('os').system('echo nope')")
+
+    def test_calculator_python_sandbox_supports_restricted_math_code(self):
+        tool = CalculatorTool(backend="python_sandbox", timeout_sec=3.0)
+
+        def calc(expression: str) -> str:
+            observation, _done, _info = tool.run({"expression": expression}, sample={}, history=[])
+            self.assertEqual(observation["backend"], "python_sandbox")
+            return observation["result"]
+
+        self.assertEqual(calc("import math; math.ceil(30 / 4)"), "8")
+        self.assertEqual(calc("a, b = 4, -100; -b/a"), "25.0")
+        self.assertEqual(calc("x = 3\nfor i in range(6):\n    x *= 2\nx"), "192")
+        self.assertEqual(calc("x = 3; for i in range(6): x *= 2; x"), "192")
+        self.assertEqual(calc("solve(60*(20-x) - 30*x - 660, x)[0]"), "6")
+        self.assertEqual(calc("sqrt(16) + expand((x + 1)**2).subs(x, 2)"), "13")
+        self.assertEqual(
+            calc('from sympy import symbols, Eq, solve\nx = symbols("x")\nsolve(Eq(60 * (20 - x) - 30 * x, 660), x)[0]'),
+            "6",
+        )
+        self.assertEqual(calc("final_weight = 2 * 3 + 2 * 2 * 2"), "14")
+        with self.assertRaises(ValueError):
+            calc("import os; os.system('echo nope')")
+        with self.assertRaises(ValueError):
+            calc("open('/tmp/nope', 'w')")
 
     def test_auto_evidence_adds_or_bench_action_and_behavior_correctness(self):
         evidence = build_auto_candidate_evidence(
@@ -654,12 +807,15 @@ class V02FixTests(unittest.TestCase):
         self.assertNotIn("lower utility", rejected_text)
         self.assertNotIn("alternative despite", rejected_text)
         chosen_payload = json.loads(train[0]["chosen"])
-        self.assertIn("reasoning", chosen_payload)
-        self.assertIn("decision", chosen_payload)
+        self.assertNotIn("reasoning", chosen_payload)
+        self.assertNotIn("decision", chosen_payload)
         self.assertEqual(
-            list(chosen_payload["decision"].keys()),
+            list(chosen_payload.keys()),
             ["action", "confidence", "brief_rationale", "action_input"],
         )
+        self.assertEqual(train[0]["metadata"]["prompt_mode"], "decision_window")
+        self.assertIn("state_reasoning_attempt", train[0]["metadata"])
+        self.assertIn("Decision-window mode", train[0]["prompt_messages"][1]["content"])
         self.assertEqual(len(train[0]["chosen_messages"]), 1)
         self.assertIn("choose exactly one action", train[0]["prompt_messages"][0]["content"].lower())
 
@@ -673,6 +829,261 @@ class V02FixTests(unittest.TestCase):
         self.assertFalse(train)
         self.assertFalse(eval_pairs)
         self.assertTrue(any(item["reason"] == "teacher_source_not_allowed" for item in diagnostics))
+
+    def test_pair_builder_adds_near_tie_weak_pairs_from_schema_diagnostics(self):
+        answer = canonicalize_candidate(
+            {"rank": 1, "action": "ANSWER", "confidence": 0.6, "action_input": {"answer": "4"}}
+        )
+        search = canonicalize_candidate(
+            {"rank": 2, "action": "SEARCH", "confidence": 0.5, "action_input": {"query": "2+2"}}
+        )
+        record = {
+            "state_id": "near-tie-augment",
+            "example_id": "e-near",
+            "dataset": "gsm8k",
+            "boundary_type": "reasoning",
+            "question": "What is 2+2?",
+            "gold_answer": "4",
+            "metadata": {"task_type": "math", "can_search": True},
+            "semantic_tags": {},
+            "active_semantic_tags": [],
+            "process_features": {},
+            "candidates": [answer, search],
+            "branches": [],
+            "diagnostics": [],
+        }
+        teacher_label = {
+            "state_id": "near-tie-augment",
+            "source": "llm_teacher",
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.70},
+                {"rank": 2, "action": "SEARCH", "score": 0.60},
+            ],
+            "rubric_degenerate": False,
+        }
+        config = {
+            "pair_construction": {
+                "min_utility_gap": 0.2,
+                "require_different_action_types": True,
+                "augmentation": {
+                    "enabled": True,
+                    "near_tie": {
+                        "enabled": True,
+                        "max_pairs": 1,
+                        "primary_min_gap": 0.10,
+                        "fallback_min_gap": 0.05,
+                        "max_gap": 0.20,
+                        "sample_weight": 0.4,
+                    },
+                },
+            },
+            "datasets": {"eval": []},
+            "scoring": {"action_cost": {}, "semantic_bonus": {}},
+        }
+        train, eval_pairs, diagnostics = build_step_dpo_pairs([record], [teacher_label], config, show_progress=False)
+        pairs = train + eval_pairs
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0]["pair_kind"], "near_tie")
+        self.assertEqual(pairs[0]["metadata"]["sample_weight"], 0.4)
+        self.assertTrue(any(item["reason"] == "no_valid_pair_after_schema_filter" for item in diagnostics))
+
+    def test_pair_builder_adds_best_mid_augments_from_three_candidate_windows(self):
+        answer = canonicalize_candidate(
+            {"rank": 1, "action": "ANSWER", "confidence": 0.7, "action_input": {"answer": "4"}}
+        )
+        search = canonicalize_candidate(
+            {"rank": 2, "action": "SEARCH", "confidence": 0.5, "action_input": {"query": "2+2"}}
+        )
+        refuse = canonicalize_candidate(
+            {"rank": 3, "action": "REFUSE", "confidence": 0.2, "action_input": {"reason": "cannot answer"}}
+        )
+        record = {
+            "state_id": "best-mid-augment",
+            "example_id": "e-best-mid",
+            "dataset": "in3",
+            "boundary_type": "intention",
+            "question": "What is 2+2?",
+            "gold_answer": "4",
+            "metadata": {"task_type": "intention_boundary", "can_search": True, "allow_refuse": True},
+            "semantic_tags": {},
+            "active_semantic_tags": [],
+            "process_features": {},
+            "candidates": [answer, search, refuse],
+            "branches": [],
+            "diagnostics": [],
+        }
+        teacher_label = {
+            "state_id": "best-mid-augment",
+            "source": "llm_teacher",
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.90},
+                {"rank": 2, "action": "SEARCH", "score": 0.60},
+                {"rank": 3, "action": "REFUSE", "score": 0.10},
+            ],
+            "rubric_degenerate": False,
+        }
+        config = {
+            "pair_construction": {
+                "min_utility_gap": 0.2,
+                "require_different_action_types": True,
+                "augmentation": {
+                    "enabled": True,
+                    "best_mid": {
+                        "enabled": True,
+                        "max_pairs": 1,
+                        "min_gap": 0.10,
+                        "sample_weight": 0.7,
+                        "dataset_quota": {"in3": 1},
+                    },
+                },
+            },
+            "datasets": {"eval": []},
+            "scoring": {"action_cost": {}, "semantic_bonus": {}},
+        }
+        train, eval_pairs, diagnostics = build_step_dpo_pairs([record], [teacher_label], config, show_progress=False)
+        pairs = train + eval_pairs
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual([pair["pair_kind"] for pair in pairs], ["strong", "best_mid"])
+        self.assertEqual(pairs[1]["chosen_action"], "ANSWER")
+        self.assertEqual(pairs[1]["rejected_action"], "SEARCH")
+        self.assertEqual(pairs[1]["metadata"]["sample_weight"], 0.7)
+        self.assertFalse(diagnostics)
+
+    def test_pair_builder_best_mid_quota_can_disable_backfill(self):
+        def record_for(dataset: str, state_id: str) -> dict:
+            return {
+                "state_id": state_id,
+                "example_id": state_id,
+                "dataset": dataset,
+                "boundary_type": "intention",
+                "question": "What is 2+2?",
+                "gold_answer": "4",
+                "metadata": {"task_type": "intention_boundary", "can_search": True, "allow_refuse": True},
+                "semantic_tags": {},
+                "active_semantic_tags": [],
+                "process_features": {},
+                "candidates": [
+                    canonicalize_candidate(
+                        {"rank": 1, "action": "ANSWER", "confidence": 0.7, "action_input": {"answer": "4"}}
+                    ),
+                    canonicalize_candidate(
+                        {"rank": 2, "action": "SEARCH", "confidence": 0.5, "action_input": {"query": "2+2"}}
+                    ),
+                    canonicalize_candidate(
+                        {"rank": 3, "action": "REFUSE", "confidence": 0.2, "action_input": {"reason": "cannot answer"}}
+                    ),
+                ],
+                "branches": [],
+                "diagnostics": [],
+            }
+
+        def label_for(state_id: str) -> dict:
+            return {
+                "state_id": state_id,
+                "source": "llm_teacher",
+                "candidate_utility": [
+                    {"rank": 1, "action": "ANSWER", "score": 0.90},
+                    {"rank": 2, "action": "SEARCH", "score": 0.60},
+                    {"rank": 3, "action": "REFUSE", "score": 0.10},
+                ],
+                "rubric_degenerate": False,
+            }
+
+        records = [record_for("in3", "quota-in3"), record_for("mintqa", "quota-mintqa")]
+        labels = [label_for("quota-in3"), label_for("quota-mintqa")]
+        config = {
+            "pair_construction": {
+                "min_utility_gap": 0.2,
+                "require_different_action_types": True,
+                "augmentation": {
+                    "enabled": True,
+                    "best_mid": {
+                        "enabled": True,
+                        "max_pairs": 2,
+                        "min_gap": 0.10,
+                        "sample_weight": 0.7,
+                        "dataset_quota": {"in3": 2},
+                        "fill_remaining": False,
+                    },
+                },
+            },
+            "datasets": {"eval": []},
+            "scoring": {"action_cost": {}, "semantic_bonus": {}},
+        }
+        train, eval_pairs, diagnostics = build_step_dpo_pairs(records, labels, config, show_progress=False)
+        pairs = train + eval_pairs
+        best_mid_pairs = [pair for pair in pairs if pair["pair_kind"] == "best_mid"]
+        self.assertEqual(len(best_mid_pairs), 1)
+        self.assertEqual(best_mid_pairs[0]["dataset"], "in3")
+        self.assertFalse(diagnostics)
+
+    def test_pair_builder_post_filters_dataset_action_pair_quota(self):
+        def record_for(idx: int, chosen_action: str, rejected_action: str) -> dict:
+            def candidate(rank: int, action: str, value: str) -> dict:
+                payload = {
+                    "ANSWER": {"answer": value},
+                    "SEARCH": {"query": value},
+                    "REFUSE": {"reason": value},
+                }[action]
+                return canonicalize_candidate(
+                    {"rank": rank, "action": action, "confidence": 0.7 - rank * 0.1, "action_input": payload}
+                )
+
+            return {
+                "state_id": f"mintqa-quota-{idx}",
+                "example_id": f"mintqa-quota-{idx}",
+                "dataset": "mintqa",
+                "boundary_type": "factual",
+                "question": "Who is associated with this entity?",
+                "gold_answer": "A",
+                "metadata": {"task_type": "factual_boundary", "can_search": True, "allow_refuse": True},
+                "semantic_tags": {},
+                "active_semantic_tags": [],
+                "process_features": {},
+                "candidates": [
+                    candidate(1, chosen_action, f"chosen-{idx}"),
+                    candidate(2, rejected_action, f"rejected-{idx}"),
+                ],
+                "branches": [],
+                "diagnostics": [],
+            }
+
+        records = [
+            record_for(1, "SEARCH", "ANSWER"),
+            record_for(2, "SEARCH", "ANSWER"),
+            record_for(3, "SEARCH", "ANSWER"),
+            record_for(4, "ANSWER", "REFUSE"),
+        ]
+        labels = [
+            {
+                "state_id": record["state_id"],
+                "source": "llm_teacher",
+                "candidate_utility": [
+                    {"rank": 1, "action": record["candidates"][0]["action"], "score": 0.9},
+                    {"rank": 2, "action": record["candidates"][1]["action"], "score": 0.1},
+                ],
+                "rubric_degenerate": False,
+            }
+            for record in records
+        ]
+        config = {
+            "pair_construction": {
+                "min_utility_gap": 0.2,
+                "require_different_action_types": True,
+                "post_filter": {
+                    "enabled": True,
+                    "action_pair_quota_by_dataset": {"mintqa": {"SEARCH>ANSWER": 2}},
+                },
+            },
+            "datasets": {"eval": []},
+            "scoring": {"action_cost": {}, "semantic_bonus": {}},
+        }
+        train, eval_pairs, diagnostics = build_step_dpo_pairs(records, labels, config, show_progress=False)
+        pairs = train + eval_pairs
+        action_pairs = Counter(f"{pair['chosen_action']}>{pair['rejected_action']}" for pair in pairs)
+        self.assertEqual(action_pairs["SEARCH>ANSWER"], 2)
+        self.assertEqual(action_pairs["ANSWER>REFUSE"], 1)
+        self.assertFalse(diagnostics)
 
 
 if __name__ == "__main__":

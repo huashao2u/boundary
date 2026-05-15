@@ -40,10 +40,16 @@ For ANSWER:
 - Do not output an unevaluated expression as ANSWER. Use CALCULATE for expressions.
 
 For CALCULATE:
-- `action_input.expression` must be a concrete executable expression.
-- Use Python-style operators: `**` for exponentiation, not `^`.
-- Do not include words or units in the expression.
-- Convert units before writing the expression, e.g. `2 dozen = 2*12`.
+- `action_input.expression` must be a restricted Python math snippet whose printed output is the numeric or symbolic answer.
+- For a single expression, you may omit `print`; the tool will evaluate it as if it were printed.
+- For multi-step calculations, use simple Python-style assignments and make the last line either the final expression or `print(final_value)`.
+- Use Python syntax: `*` for multiplication, `**` for exponentiation, `/` for division, `%` for modulo, and parentheses for grouping.
+- Supported helpers include `sum`, `range`, `min`, `max`, `abs`, `round`, and Python math/sympy forms such as `import math`, `import sympy as sp`, `from sympy import symbols, Eq, solve, sqrt, simplify`.
+- For algebra, write executable sympy code rather than natural-language instructions, e.g. `x = symbols("x"); solve(Eq(4*x + 5, 9), x)[0]`.
+- Short bounded loops such as `for i in range(6): ...` are allowed when they are the clearest calculation.
+- Do not include units, comments, explanations, file/network/system calls, unsafe imports, or natural-language instructions such as "solve for x".
+- If a task is very complex, it is acceptable to use CALCULATE as the next computation step and continue after the observation when another tool step is allowed.
+- Convert units before writing the expression, e.g. two dozen should be written as `2 * 12`.
 
 For CLARIFY:
 - `action_input.question` must be a direct question asking for missing critical information.

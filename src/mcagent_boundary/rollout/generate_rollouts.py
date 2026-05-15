@@ -108,7 +108,9 @@ def generate_rollouts(
     limit_per_dataset: int | None = None,
     selection_preset: str | None = None,
     fixed_example_ids: set[str] | None = None,
+    skip_example_keys: set[tuple[str, str]] | None = None,
     show_progress: bool = True,
+    record_callback: Callable[[dict], None] | None = None,
     progress_callback: Callable[[dict], None] | None = None,
 ) -> list[dict]:
     examples = load_standardized_examples(
@@ -150,8 +152,14 @@ def generate_rollouts(
     )
     rollouts: list[dict] = []
     counters: Counter[str] = Counter()
+    skip_example_keys = skip_example_keys or set()
     for dataset_name in dataset_names:
-        dataset_examples = [example for example in examples if example.dataset == dataset_name]
+        dataset_examples = [
+            example
+            for example in examples
+            if example.dataset == dataset_name
+            and (str(example.dataset), str(example.example_id)) not in skip_example_keys
+        ]
         progress = make_progress(
             dataset_examples,
             total=len(dataset_examples),
@@ -161,6 +169,8 @@ def generate_rollouts(
         )
         for example in progress:
             record = rollout_one_example(example, config=config, phase=phase, policy=policy)
+            if record_callback is not None:
+                record_callback(record)
             rollouts.append(record)
             counters["records"] += 1
             counters["valid_candidates"] += int(record.get("valid_candidate_count") or 0)

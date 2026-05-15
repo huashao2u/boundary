@@ -53,7 +53,7 @@ teacher:
   provider: poe
   source_label: llm_teacher
   model_env: POE_TEACHER_MODEL
-  default_model: "gpt-5-nano"
+  default_model: "GPT-5-nano"
   api_key_env: POE_API_KEY
   api_key: ""
   base_url_env: POE_BASE_URL
