@@ -54,7 +54,7 @@ _BOOST_MAP: dict[str, str] = {
     "SEARCH": "SEARCH_REQUIRED",
     "CALCULATE": "CALCULATION_REQUIRED",
     "CLARIFY": "CLARIFY_REQUIRED",
-    "REFUSE": "FALSE_PREMISE",
+    "REFUSE": "JUSTIFIED_REFUSE",
 }
 
 
@@ -85,11 +85,9 @@ def _rule_helpfulness_score(action: str, active_tags: set[str]) -> tuple[float, 
             return 0.8, "MISSING_INFO tag present — clarification is appropriate"
         return 0.2, "No MISSING_INFO tag — clarification likely unnecessary"
     if action == "REFUSE":
-        if "FALSE_PREMISE" in active_tags or "JUSTIFIED_REFUSE" in active_tags:
-            return 0.8, "FALSE_PREMISE or JUSTIFIED_REFUSE tag present — refusal is appropriate"
-        if "MISSING_INFO" in active_tags:
-            return 0.5, "MISSING_INFO present — refusal may be warranted if clarification unavailable"
-        return 0.2, "No refusal-justifying tag — refusal likely inappropriate"
+        if "JUSTIFIED_REFUSE" in active_tags:
+            return 0.8, "JUSTIFIED_REFUSE tag present — refusal is appropriate"
+        return 0.2, "No safety refusal tag — refusal likely inappropriate"
     return 0.5, "unknown action"
 
 
@@ -176,8 +174,6 @@ def _rule_fallback_candidate_reflection(candidates: list[dict[str, Any]]) -> lis
 def _best_action_from_tags(active_tags: set[str], candidates: list[dict[str, Any]]) -> str:
     """Pick best action from semantic tags, restricted to candidate actions."""
     candidate_actions = {str(c.get("action", "")).upper() for c in candidates}
-    if "FALSE_PREMISE" in active_tags and "REFUSE" in candidate_actions:
-        return "REFUSE"
     if "JUSTIFIED_REFUSE" in active_tags and "REFUSE" in candidate_actions:
         return "REFUSE"
     if ("CLARIFY_REQUIRED" in active_tags or "MISSING_INFO" in active_tags) and "CLARIFY" in candidate_actions:

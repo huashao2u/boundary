@@ -43,8 +43,8 @@ def build_system_prompt(enable_tool_schema: bool = True) -> str:
     )
     tool_hint = (
         "Use `SEARCH` for external evidence, `CALCULATE` for arithmetic or symbolic computation, "
-        "`CLARIFY` for missing critical information, and `REFUSE` when the premise is false or the request "
-        "cannot be responsibly completed with the available tools."
+        "`CLARIFY` for missing critical information, and `REFUSE` only when the request itself is unsafe, "
+        "harmful, or disallowed. Do not refuse merely because evidence is missing, a premise is false, or a tool failed."
     )
     if not enable_tool_schema:
         tool_hint = "Still return the same JSON schema."

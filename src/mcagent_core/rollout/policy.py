@@ -145,15 +145,17 @@ def _build_finalize_prompt(sample, decision: dict[str, Any], observation: dict[s
     return (
         "You are a decision-aware assistant.\n\n"
         "You previously selected a tool action and now have the tool observation.\n"
-        "Use the observation directly; do not invent additional facts. Return valid JSON only.\n\n"
+        "Reason briefly from the observation, then return valid JSON only.\n"
+        "Do not refuse because a tool failed, evidence is missing, or a premise is unsupported; REFUSE is only for unsafe, harmful, or disallowed user requests.\n\n"
         f"Original question: {getattr(sample, 'question', '')}\n"
         f"Action taken: {decision.get('action')}\n"
         f"Action input: {json.dumps(decision.get('action_input', {}), ensure_ascii=False)}\n"
         f"Tool observation: {json.dumps(observation, ensure_ascii=False)}\n\n"
-        "If another tool action is strictly necessary, return SEARCH, CALCULATE, or CLARIFY with the required action_input.\n"
+        "If another tool action is strictly necessary and allowed, return SEARCH, CALCULATE, or CLARIFY with the required action_input.\n"
         "For CALCULATE, action_input.expression must be a restricted Python math snippet whose printed output is the answer.\n\n"
-        "Return JSON: {\"final_decision\":{\"action\":\"ANSWER|SEARCH|CALCULATE|CLARIFY|REFUSE\","
-        "\"confidence\":0.0,\"action_input\":{},\"brief_rationale\":\"\"}}"
+        "Return JSON: {\"reasoning\":{\"attempt\":\"...\",\"observation_summary\":\"...\",\"remaining_uncertainty\":\"...\"},"
+        "\"final_decision\":{\"action\":\"ANSWER|SEARCH|CALCULATE|CLARIFY|REFUSE\",\"confidence\":0.0,"
+        "\"brief_rationale\":\"\",\"action_input\":{}}}"
     )
 
 
@@ -176,7 +178,7 @@ def _jsonish_payload(raw_text: str) -> dict[str, Any] | None:
         return None
 
 
-def _parse_finalize_output(raw_text: str, *, default_action: str) -> dict[str, str]:
+def _parse_finalize_output(raw_text: str, *, default_action: str) -> dict[str, Any]:
     payload = _jsonish_payload(raw_text)
     if payload is None:
         return {
@@ -195,30 +197,31 @@ def _parse_finalize_output(raw_text: str, *, default_action: str) -> dict[str, s
     action_input = final_decision.get("action_input") or {}
     if not isinstance(action_input, dict):
         action_input = {}
+    common = {
+        "action": action,
+        "action_input": action_input,
+        "brief_rationale": str(final_decision.get("brief_rationale") or ""),
+        "finalize_reasoning": payload.get("reasoning") if isinstance(payload.get("reasoning"), dict) else {},
+        "raw_finalize_text": raw_text,
+    }
     if action == "ANSWER":
         answer = action_input.get("answer") or action_input.get("final_answer") or action_input.get("response") or ""
         return {
-            "action": action,
-            "action_input": action_input,
+            **common,
             "final_answer": str(answer),
             "final_status": "answered_after_tool",
-            "raw_finalize_text": raw_text,
         }
     if action == "REFUSE":
         reason = action_input.get("reason") or action_input.get("explanation") or final_decision.get("brief_rationale") or ""
         return {
-            "action": action,
-            "action_input": action_input,
+            **common,
             "final_answer": str(reason),
             "final_status": "refused_after_tool",
-            "raw_finalize_text": raw_text,
         }
     return {
-        "action": action,
-        "action_input": action_input,
+        **common,
         "final_answer": json.dumps(action_input, ensure_ascii=False),
         "final_status": f"needs_additional_{action.lower()}",
-        "raw_finalize_text": raw_text,
     }
 
 

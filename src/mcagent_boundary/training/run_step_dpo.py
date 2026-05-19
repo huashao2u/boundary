@@ -186,6 +186,32 @@ def _make_weighted_dpo_trainer(base_cls):
     return WeightedDPOTrainer
 
 
+def _make_weighted_preference_collator(dpo_args, tokenizer):
+    from trl.trainer.dpo_trainer import DataCollatorForPreference
+    import torch
+
+    class WeightedPreferenceCollator(DataCollatorForPreference):
+        def torch_call(self, examples):
+            output = super().torch_call(examples)
+            if examples and "sample_weight" in examples[0]:
+                output["sample_weight"] = torch.tensor(
+                    [float(example.get("sample_weight", 1.0)) for example in examples],
+                    dtype=torch.float32,
+                )
+            return output
+
+    pad_token = dpo_args.pad_token or tokenizer.pad_token or tokenizer.eos_token
+    if pad_token not in tokenizer.get_vocab():
+        raise ValueError(f"The configured pad token is not in the tokenizer vocabulary: {pad_token!r}")
+    tokenizer.pad_token = pad_token
+    return WeightedPreferenceCollator(
+        pad_token_id=tokenizer.pad_token_id,
+        max_length=dpo_args.max_length,
+        truncation_mode=dpo_args.truncation_mode,
+        pad_to_multiple_of=dpo_args.pad_to_multiple_of,
+    )
+
+
 def run_step_dpo(
     train_pairs: list[dict],
     eval_pairs: list[dict],
@@ -222,7 +248,11 @@ def run_step_dpo(
         logging_steps=int(training_cfg["logging_steps"]),
         eval_steps=int(training_cfg["eval_steps"]),
         save_steps=int(training_cfg["save_steps"]),
+        save_total_limit=(
+            int(training_cfg["save_total_limit"]) if training_cfg.get("save_total_limit") is not None else None
+        ),
         max_length=int(training_cfg["max_length"]),
+        truncation_mode=str(training_cfg.get("truncation_mode", "keep_end")),
         remove_unused_columns=False,
         report_to=list(training_cfg.get("report_to", [])),
         do_eval=bool(eval_data),
@@ -232,10 +262,12 @@ def run_step_dpo(
         gradient_checkpointing=bool(training_cfg.get("gradient_checkpointing", True)),
     )
     trainer_cls = _make_weighted_dpo_trainer(DPOTrainer) if use_sample_weights else DPOTrainer
+    data_collator = _make_weighted_preference_collator(dpo_args, tokenizer) if use_sample_weights else None
     trainer = trainer_cls(
         model=model,
         ref_model=None,
         args=dpo_args,
+        data_collator=data_collator,
         train_dataset=Dataset.from_list(train_data),
         eval_dataset=Dataset.from_list(eval_data) if eval_data else None,
         processing_class=tokenizer,

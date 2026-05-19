@@ -100,13 +100,26 @@ def _allowed_actions_from_record(record: dict[str, Any]) -> list[str]:
         "CLARIFY": "can_clarify",
         "REFUSE": "allow_refuse",
     }
+    has_metadata_action_flags = any(flag in metadata for flag in metadata_action_flags.values())
+    dataset = str(record.get("dataset") or metadata.get("dataset") or metadata.get("legacy_dataset") or "").lower()
     for action, flag in metadata_action_flags.items():
-        if bool(metadata.get(flag)):
+        enabled = bool(metadata.get(flag))
+        if action == "REFUSE":
+            if dataset in {"in3", "mintqa"}:
+                enabled = False
+            elif dataset == "or_bench":
+                enabled = bool(metadata.get("should_refuse", enabled))
+        if enabled:
             actions.append(action)
-    for candidate in record.get("candidates") or []:
-        action = str(candidate.get("action", "")).upper()
-        if action in _ACTION_SET and action not in actions:
-            actions.append(action)
+    # Legacy fallback only: old records without action-space metadata used the
+    # candidate list to reconstruct allowed actions. When metadata is present,
+    # it is authoritative so stale candidates cannot re-enable REFUSE for
+    # datasets such as IN3 or MintQA.
+    if not has_metadata_action_flags:
+        for candidate in record.get("candidates") or []:
+            action = str(candidate.get("action", "")).upper()
+            if action in _ACTION_SET and action not in actions:
+                actions.append(action)
     return actions
 
 

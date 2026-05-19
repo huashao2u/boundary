@@ -71,7 +71,7 @@ annotation:
 eval:
   execute_tools: true               # eval: execute tools for real
   tool_finalize_pass: true          # run student finalize pass after tool observation
-  tool_finalize_depth: 1            # post-tool finalize passes; >1 enables additional tool actions proposed by finalize
+  tool_finalize_depth: 2            # post-tool finalize passes; 2 allows initial action + one additional tool action + final answer
   max_branch_steps: 2
   prompt_mode: decision_window      # default eval mirrors DPO: question + original reasoning_attempt -> decision
 
@@ -228,7 +228,6 @@ tools:
     online_timeout_seconds: 30
     country_code: us
     language_code: en
-    serper_api_key_env: SERPER_API_KEY
     serper_base_url: https://google.serper.dev/search
     brave_api_key_env: BRAVE_SEARCH_API_KEY
     brave_base_url: https://api.search.brave.com/res/v1/web/search

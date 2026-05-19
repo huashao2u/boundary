@@ -136,8 +136,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/01_build_adapters.py \
 
 功能：运行学生 policy，解析 top-k action candidates，只写训练侧 rollout 记录。v0.2.6 按
 `allowed_actions` 自适应 `effective_top_k=min(top_k_actions, len(allowed_actions))`：GSM8K/MATH
-默认只开放 `ANSWER/CALCULATE`，OR-Bench 只开放 `ANSWER/REFUSE`，因此这些数据集默认要求 2 个
-不同 action candidates。v0.2.3 起默认使用
+默认只开放 `ANSWER/CALCULATE`，IN3 只开放 `ANSWER/CLARIFY`，MintQA 只开放
+`ANSWER/SEARCH`；REFUSE 只用于 unsafe/harmful/disallowed 请求，OR-Bench 仅在
+`should_refuse=true` 样本开放 `ANSWER/REFUSE`，其余 OR-Bench 样本只开放 `ANSWER`。因此各数据集
+会按题目动作空间要求不同数量的 action candidates。v0.2.3 起默认使用
 vLLM，并对每个 student candidate 的 action JSON 计算 teacher-forced logprob mean，作为
 process uncertainty 诊断信号。boundary / anchor 挖掘已拆到 `02b_mine_boundary.py`，因此可以
 基于同一份 `all_rollouts.jsonl` 反复调阈值和采样配额。
@@ -388,7 +390,8 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/05_optional_warmup.py --run-
 训练入口把 `prompt_messages/chosen_messages/rejected_messages` 转成 conversational
 `prompt/chosen/rejected`，并默认保留每条 pair 的 `sample_weight` 进入 DPO loss；flat text
 字段仅用于 debug/export。`training.use_sample_weights: true` 时，`strong/near_tie/best_mid`
-样本会分别按构建阶段写入的权重更新，DPO 训练不执行任何工具查询。
+样本会分别按构建阶段写入的权重更新；`training.truncation_mode: keep_end` 保证较长 prompt
+被截断时仍保留 action completion。DPO 训练不执行任何工具查询。
 
 参数：
 

@@ -11,7 +11,7 @@ class MintQAAdapter(DatasetAdapter):
     can_search = True
     can_calculate = False
     can_clarify = False
-    allow_refuse = True
+    allow_refuse = False
 
     def _convert(self, sample, split: str) -> StandardizedExample:
         return StandardizedExample(

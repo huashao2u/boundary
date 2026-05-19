@@ -11,7 +11,7 @@ class IN3Adapter(DatasetAdapter):
     can_search = False
     can_calculate = False
     can_clarify = True
-    allow_refuse = True
+    allow_refuse = False
 
     def _convert(self, sample, split: str) -> StandardizedExample:
         return StandardizedExample(

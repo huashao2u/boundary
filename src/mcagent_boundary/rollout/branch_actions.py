@@ -138,8 +138,7 @@ def _dynamic_student_examples(allowed_actions: list[str]) -> str:
   },
   "candidates": [
     {"rank": 1, "action": "CLARIFY", "confidence": 0.86, "brief_rationale": "The city is necessary for a useful recommendation.", "action_input": {"question": "Which city should I search in?"}},
-    {"rank": 2, "action": "ANSWER", "confidence": 0.25, "brief_rationale": "A direct answer is possible only in a generic, less useful form.", "action_input": {"answer": "I can suggest general date-night restaurant criteria, but I need the city to recommend a specific place."}},
-    {"rank": 3, "action": "REFUSE", "confidence": 0.05, "brief_rationale": "Refusal is too strong because the missing information can be clarified.", "action_input": {"reason": "The task is underspecified, but clarification is better than refusal."}}
+    {"rank": 2, "action": "ANSWER", "confidence": 0.25, "brief_rationale": "A direct answer is possible only in a generic, less useful form.", "action_input": {"answer": "I can suggest general date-night restaurant criteria, but I need the city to recommend a specific place."}}
   ]
 }
 ```
@@ -159,8 +158,7 @@ def _dynamic_student_examples(allowed_actions: list[str]) -> str:
   },
   "candidates": [
     {"rank": 1, "action": "SEARCH", "confidence": 0.82, "brief_rationale": "A targeted search is needed for reliable evidence.", "action_input": {"query": "specific entity relation in the question"}},
-    {"rank": 2, "action": "ANSWER", "confidence": 0.18, "brief_rationale": "A direct answer would be unsupported.", "action_input": {"answer": "I cannot determine the answer reliably from internal knowledge alone."}},
-    {"rank": 3, "action": "REFUSE", "confidence": 0.12, "brief_rationale": "Refusal is possible but search is more helpful if available.", "action_input": {"reason": "Without external evidence, giving a definitive answer would be unreliable."}}
+    {"rank": 2, "action": "ANSWER", "confidence": 0.18, "brief_rationale": "A direct answer would be uncertain, so it should be phrased cautiously if used.", "action_input": {"answer": "I cannot determine the answer reliably from internal knowledge alone."}}
   ]
 }
 ```
@@ -224,25 +222,92 @@ def _finalize_after_tool_heuristic(action: str, observation: dict[str, Any]) -> 
     return observation.get("answer"), observation.get("status", "answered")
 
 
-def _run_finalize_pass(policy, sample, candidate: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
+def _observation_indicates_failure(observation: dict[str, Any]) -> bool:
+    status = str(observation.get("status") or "").lower()
+    if status in {"tool_error", "error", "failed", "failure", "timeout"}:
+        return True
+    return any(key in observation and observation.get(key) for key in ("error", "tool_error", "exception"))
+
+
+def _allowed_finalize_actions(sample, observation: dict[str, Any] | None = None) -> list[str]:
+    metadata = dict(getattr(sample, "metadata", {}) or {})
+    dataset = str(metadata.get("dataset") or metadata.get("legacy_dataset") or getattr(sample, "dataset", "")).lower()
+    actions = ["ANSWER"]
+    for action, flag in (("SEARCH", "can_search"), ("CALCULATE", "can_calculate"), ("CLARIFY", "can_clarify")):
+        if bool(metadata.get(flag)):
+            actions.append(action)
+    allow_refuse = bool(metadata.get("allow_refuse"))
+    if dataset in {"in3", "mintqa"}:
+        allow_refuse = False
+    elif dataset == "or_bench":
+        allow_refuse = bool(metadata.get("should_refuse", allow_refuse))
+    if allow_refuse and not _observation_indicates_failure(observation or {}):
+        actions.append("REFUSE")
+    return actions
+
+
+def _format_finalize_trace(trace: list[dict[str, Any]] | None) -> str:
+    compact: list[dict[str, Any]] = []
+    for item in trace or []:
+        result = dict(item.get("finalize_result") or {})
+        compact.append({
+            "step": item.get("step"),
+            "action": item.get("action"),
+            "action_input": item.get("action_input") or {},
+            "observation": item.get("observation") or {},
+            "finalize_action": result.get("action"),
+            "finalize_action_input": result.get("action_input") or {},
+            "finalize_status": result.get("final_status"),
+            "brief_rationale": result.get("brief_rationale", ""),
+        })
+    return json.dumps(compact, ensure_ascii=False)
+
+
+def _run_finalize_pass(
+    policy,
+    sample,
+    candidate: dict[str, Any],
+    observation: dict[str, Any],
+    *,
+    history: list[dict[str, Any]] | None = None,
+    trace: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Run student finalize pass after tool observation (eval only)."""
     try:
         finalize_prompt_text = _read_prompt("student_finalize_after_tool.md").strip()
         obs_text = json.dumps(observation, ensure_ascii=False)
+        history_text = json.dumps(history or [], ensure_ascii=False)
+        allowed_actions = _allowed_finalize_actions(sample, observation)
+        allowed_block = "Allowed final actions for this example:\n" + "\n".join(f"- {action}" for action in allowed_actions)
         full_prompt = (
             finalize_prompt_text + "\n\n"
-            f"Original question: {sample.question}\n"
-            f"Action taken: {candidate['action']}\n"
-            f"Action input: {json.dumps(candidate.get('action_input', {}), ensure_ascii=False)}\n"
-            f"Tool observation: {obs_text}\n\n"
-            "Return JSON with final_decision only."
+            f"Original question: {sample.question}\n\n"
+            f"{allowed_block}\n\n"
+            f"Previous action/observation history: {history_text}\n"
+            f"Prior finalize attempts: {_format_finalize_trace(trace)}\n"
+            f"Current action taken: {candidate['action']}\n"
+            f"Current action input: {json.dumps(candidate.get('action_input', {}), ensure_ascii=False)}\n"
+            f"Current tool observation: {obs_text}\n\n"
+            "Return JSON with reasoning and final_decision only."
         )
         if hasattr(policy, "finalize_after_tool"):
-            return policy.finalize_after_tool(sample, candidate, observation, full_prompt)
-        # DEPRECATED(mainline): eval-only fallback when a policy lacks a
-        # finalize method; never used by train-side annotation.
-        final_answer, final_status = _finalize_after_tool_heuristic(candidate["action"], observation)
-        return {"final_answer": final_answer or "", "final_status": final_status}
+            result = policy.finalize_after_tool(sample, candidate, observation, full_prompt)
+        else:
+            # DEPRECATED(mainline): eval-only fallback when a policy lacks a
+            # finalize method; never used by train-side annotation.
+            final_answer, final_status = _finalize_after_tool_heuristic(candidate["action"], observation)
+            result = {"final_answer": final_answer or "", "final_status": final_status}
+        action = str(result.get("action") or "").upper()
+        if action and action not in set(allowed_actions):
+            result.update({
+                "final_answer": "",
+                "final_status": "finalize_disallowed_action",
+                "disallowed_action": action,
+                "allowed_actions": allowed_actions,
+            })
+        else:
+            result.setdefault("allowed_actions", allowed_actions)
+        return result
     except Exception as exc:
         logger.warning("finalize_after_tool failed for action %s: %s", candidate["action"], exc)
         return {"final_answer": "", "final_status": "finalize_parse_failed", "finalize_error": str(exc)}
@@ -278,7 +343,14 @@ def _run_tool_finalize_loop(
     trace: list[dict[str, Any]] = []
     final_result: dict[str, Any] = {}
     for step_index in range(max_depth):
-        final_result = _run_finalize_pass(policy, sample, candidate, observation)
+        final_result = _run_finalize_pass(
+            policy,
+            sample,
+            candidate,
+            observation,
+            history=sandbox.history,
+            trace=trace,
+        )
         trace.append({
             "step": step_index + 1,
             "action": candidate.get("action"),
@@ -289,11 +361,12 @@ def _run_tool_finalize_loop(
         status = str(final_result.get("final_status") or "")
         next_action = str(final_result.get("action") or "").upper()
         next_input = final_result.get("action_input") or {}
-        if status == "finalize_parse_failed" or next_action in {"ANSWER", "REFUSE", ""}:
+        if status in {"finalize_parse_failed", "finalize_disallowed_action"} or next_action in {"ANSWER", "REFUSE", ""}:
             break
         if step_index + 1 >= max_depth:
             break
-        if next_action not in {"SEARCH", "CALCULATE", "CLARIFY"} or not isinstance(next_input, dict):
+        allowed_next_actions = set(_allowed_finalize_actions(sample, observation))
+        if next_action not in {"SEARCH", "CALCULATE", "CLARIFY"} or next_action not in allowed_next_actions or not isinstance(next_input, dict):
             break
         observation, _done, _info = sandbox.step(next_action, next_input)
         candidate = {
@@ -441,7 +514,7 @@ def _build_eval_branches(
             final_answer = finalize_result.get("final_answer")
             final_status = finalize_result.get("final_status", f"completed_after_{action.lower()}")
             finalize_decision = finalize_result
-            valid_for_eval_scoring = final_status != "finalize_parse_failed"
+            valid_for_eval_scoring = final_status not in {"finalize_parse_failed", "finalize_disallowed_action"}
             if not valid_for_eval_scoring:
                 diagnostics.append({
                     "example_id": example_id,

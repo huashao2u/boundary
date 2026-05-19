@@ -43,6 +43,17 @@ METRIC_DEFINITIONS = {
     "finalize_parse_failure_rate": "finalize_parse_failure_count / executed_tool_call_count; null when no tool branch is executed.",
     "tool_finalize_depth": "Configured maximum number of post-tool finalize passes. Depth 1 preserves one observation followed by one final decision; larger values can execute additional tool actions proposed by finalize.",
     "calculator_backend": "Configured calculator backend used during eval, such as safe_eval or python_sandbox.",
+    "strict_json_parse_rate": "Raw free-generation output that is a full JSON object without repair or substring extraction / num_samples.",
+    "strict_action_parse_rate": "Raw free-generation output that strictly parses to a JSON action object with an allowed action / num_samples.",
+    "schema_action_parse_rate": "Records with at least one schema-valid canonical candidate after the normal parser / num_samples.",
+    "selected_pair_u_rel_mean": "Mean teacher u_rel of the free-generation selected action when it matches the DPO pair's chosen or rejected action.",
+    "selected_real_utility_mean": "Mean outcome-based utility_real of the free-generation selected action when available after real tool execution.",
+    "selected_matches_chosen_action_rate": "Free-generation selected action equals the pair's chosen action / num_samples.",
+    "selected_matches_rejected_action_rate": "Free-generation selected action equals the pair's rejected action / num_samples.",
+    "selected_matches_best_real_action_rate": "Free-generation selected action equals the real-execution best action / examples with best_action_real.",
+    "pair_logp.chosen_gt_rejected_rate": "Teacher-forced pair scoring rate where model logp(chosen completion) > model logp(rejected completion).",
+    "pair_logp.logp_margin_mean": "Mean model_chosen_logp - model_rejected_logp over DPO eval pairs.",
+    "pair_logp.reward_margin_mean": "Mean beta*((model_chosen-ref_chosen)-(model_rejected-ref_rejected)); requires --reference-logp-file.",
     "final_correct_rate": "final_correct_count / final_correct_denom. GSM8K/MATH use normalized final numeric gold comparison, mintqa uses teacher judge, IN3 uses clarify gold where available, and OR-BENCH uses refusal/action correctness.",
     "in3_clarify_metrics.needs_clarification_count": "IN3 examples with gold clarification information, from gold_clarify_question or missing_details metadata.",
     "in3_clarify_metrics.clarify_when_needed_rate": "CLARIFY decisions on examples that need clarification / needs_clarification_count.",
@@ -78,6 +89,23 @@ def _load_pair_ids(pair_paths: list[Path], dataset_filter: set[str]) -> dict[str
     return dict(ids_by_dataset)
 
 
+def _load_pair_records(
+    pair_paths: list[Path],
+    dataset_filter: set[str],
+) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    for path in pair_paths:
+        for row in read_jsonl(path):
+            dataset = str(row.get("dataset") or "")
+            example_id = str(row.get("example_id") or "")
+            if not dataset or not example_id:
+                continue
+            if dataset_filter and dataset not in dataset_filter:
+                continue
+            pairs.append(row)
+    return pairs
+
+
 def _load_pair_records_by_example_id(
     pair_paths: list[Path],
     dataset_filter: set[str],
@@ -104,6 +132,53 @@ def _pair_reasoning_attempt(pair: dict[str, Any] | None) -> str:
         or pair.get("state_reasoning_attempt")
         or ""
     ).strip()
+
+
+
+def _strict_action_from_raw(raw_text: str, allowed_actions: set[str]) -> dict[str, Any]:
+    stripped = str(raw_text or "").strip()
+    result = {
+        "strict_json_parse_ok": False,
+        "strict_action_parse_ok": False,
+        "strict_action": None,
+    }
+    if not stripped:
+        return result
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return result
+    if not isinstance(payload, dict):
+        return result
+    result["strict_json_parse_ok"] = True
+    decision = payload.get("decision", payload)
+    if not isinstance(decision, dict):
+        return result
+    action = str(decision.get("action") or "").upper()
+    if action in allowed_actions:
+        result["strict_action_parse_ok"] = True
+        result["strict_action"] = action
+    return result
+
+
+
+def _looks_like_env_name(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z_][A-Z0-9_]*", str(value or "")))
+
+
+def _serper_api_key_available(config: dict[str, Any]) -> bool:
+    search_cfg = config.get("tools", {}).get("search", {}) or {}
+    direct_key = str(search_cfg.get("serper_api_key") or search_cfg.get("api_key") or "").strip()
+    if direct_key:
+        return True
+    env_name = str(search_cfg.get("serper_api_key_env", "SERPER_API_KEY") or "").strip()
+    if not env_name:
+        return False
+    if os.environ.get(env_name):
+        return True
+    # Some local configs store the secret directly in serper_api_key_env.
+    # Treat non-env-var-looking values as a direct key without exposing them.
+    return not _looks_like_env_name(env_name)
 
 
 def _load_examples_for_pair_ids(config: dict[str, Any], ids_by_dataset: dict[str, set[str]]) -> list[Any]:
@@ -398,6 +473,302 @@ def _rate(count: int, total: int) -> float | None:
     return None if total == 0 else count / total
 
 
+
+def _mean(values: list[float]) -> float | None:
+    return None if not values else sum(values) / len(values)
+
+
+def _percentile(values: list[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    index = (len(ordered) - 1) * q
+    low = int(index)
+    high = min(low + 1, len(ordered) - 1)
+    frac = index - low
+    return ordered[low] * (1.0 - frac) + ordered[high] * frac
+
+
+def _summarize_numeric(values: list[float]) -> dict[str, Any]:
+    return {
+        "count": len(values),
+        "mean": _mean(values),
+        "p10": _percentile(values, 0.10),
+        "p50": _percentile(values, 0.50),
+        "p90": _percentile(values, 0.90),
+        "min": min(values) if values else None,
+        "max": max(values) if values else None,
+    }
+
+
+def _pair_u_rel(pair: dict[str, Any] | None, selected_action: str | None) -> tuple[float | None, str]:
+    if not pair or not selected_action:
+        return None, "missing_pair_or_action"
+    selected_action = selected_action.upper()
+    metadata = pair.get("metadata") or {}
+    if selected_action == str(pair.get("chosen_action") or "").upper():
+        value = metadata.get("chosen_u_rel")
+        return (float(value) if value is not None else None), "chosen"
+    if selected_action == str(pair.get("rejected_action") or "").upper():
+        value = metadata.get("rejected_u_rel")
+        return (float(value) if value is not None else None), "rejected"
+    return None, "other"
+
+
+def _selected_real_utility(record: dict[str, Any]) -> float | None:
+    branch = _natural_branch(record)
+    value = branch.get("utility_real")
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _summarize_alignment_records(
+    records: list[dict[str, Any]],
+    pair_by_example_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    total = len(records)
+    strict_json = 0
+    strict_action = 0
+    schema_action = 0
+    selected_u_rel: list[float] = []
+    selected_real_utility: list[float] = []
+    selected_labels = Counter()
+    selected_best_real = 0
+    selected_best_real_denom = 0
+    selected_action_by_pair = Counter()
+    raw_action_counts = Counter()
+    for record in records:
+        allowed = {str(action).upper() for action in (record.get("allowed_actions") or [])}
+        strict = _strict_action_from_raw(str(record.get("raw_policy_text") or ""), allowed)
+        strict_json += int(bool(strict["strict_json_parse_ok"]))
+        strict_action += int(bool(strict["strict_action_parse_ok"]))
+        schema_action += int(bool(record.get("valid_candidate_count")))
+        action = str(record.get("natural_action") or "NONE").upper()
+        raw_action_counts[action] += 1
+        pair = pair_by_example_id.get(
+            str(record.get("eval_pair_id") or record.get("pair_id") or record.get("example_id"))
+        )
+        u_rel, label = _pair_u_rel(pair, None if action == "NONE" else action)
+        selected_labels[label] += 1
+        selected_action_by_pair[(label, action)] += 1
+        if u_rel is not None:
+            selected_u_rel.append(u_rel)
+        real_u = _selected_real_utility(record)
+        if real_u is not None:
+            selected_real_utility.append(real_u)
+        best_real = record.get("best_action_real")
+        if best_real:
+            selected_best_real_denom += 1
+            selected_best_real += int(action == str(best_real).upper())
+    return {
+        "num_samples": total,
+        "strict_json_parse_count": strict_json,
+        "strict_json_parse_rate": _rate(strict_json, total),
+        "strict_action_parse_count": strict_action,
+        "strict_action_parse_rate": _rate(strict_action, total),
+        "schema_action_parse_count": schema_action,
+        "schema_action_parse_rate": _rate(schema_action, total),
+        "selected_label_counts": dict(selected_labels),
+        "selected_matches_chosen_action_rate": _rate(selected_labels.get("chosen", 0), total),
+        "selected_matches_rejected_action_rate": _rate(selected_labels.get("rejected", 0), total),
+        "selected_other_action_rate": _rate(selected_labels.get("other", 0), total),
+        "selected_pair_u_rel": _summarize_numeric(selected_u_rel),
+        "selected_real_utility": _summarize_numeric(selected_real_utility),
+        "selected_matches_best_real_action_count": selected_best_real,
+        "selected_matches_best_real_action_denom": selected_best_real_denom,
+        "selected_matches_best_real_action_rate": _rate(selected_best_real, selected_best_real_denom),
+        "raw_action_counts": dict(raw_action_counts),
+        "selected_action_by_pair_label": {
+            f"{label}:{action}": count
+            for (label, action), count in sorted(selected_action_by_pair.items())
+        },
+    }
+
+
+def _tokens_from_chat(tokenizer: Any, messages: list[dict[str, str]], *, add_generation_prompt: bool) -> list[int]:
+    if getattr(tokenizer, "chat_template", None):
+        return list(
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=add_generation_prompt,
+            )
+        )
+    text = "\n".join(f"{message.get('role', 'user')}: {message.get('content', '')}" for message in messages)
+    if add_generation_prompt:
+        text += "\nassistant: "
+    return list(tokenizer.encode(text, add_special_tokens=True))
+
+
+def _completion_logp(
+    *,
+    model: Any,
+    tokenizer: Any,
+    torch_mod: Any,
+    prompt_messages: list[dict[str, str]],
+    completion_messages: list[dict[str, str]],
+    max_length: int,
+) -> dict[str, Any]:
+    prompt_ids = _tokens_from_chat(tokenizer, prompt_messages, add_generation_prompt=True)
+    full_ids = _tokens_from_chat(tokenizer, prompt_messages + completion_messages, add_generation_prompt=False)
+    completion_start = len(prompt_ids)
+    if full_ids[:completion_start] != prompt_ids:
+        prefix = 0
+        max_prefix = min(len(prompt_ids), len(full_ids))
+        while prefix < max_prefix and prompt_ids[prefix] == full_ids[prefix]:
+            prefix += 1
+        completion_start = prefix
+    if len(full_ids) > max_length:
+        drop = len(full_ids) - max_length
+        full_ids = full_ids[drop:]
+        completion_start = max(0, completion_start - drop)
+    if len(full_ids) < 2 or completion_start >= len(full_ids):
+        return {"logp": None, "mean_logp": None, "num_tokens": 0}
+    device = next(model.parameters()).device
+    input_ids = torch_mod.tensor([full_ids], dtype=torch_mod.long, device=device)
+    with torch_mod.no_grad():
+        logits = model(input_ids=input_ids).logits
+        log_probs = torch_mod.nn.functional.log_softmax(logits[:, :-1, :], dim=-1)
+        target_ids = input_ids[:, 1:]
+        token_logps = log_probs.gather(-1, target_ids.unsqueeze(-1)).squeeze(-1)[0]
+    first_scored = max(0, completion_start - 1)
+    selected = token_logps[first_scored:]
+    if selected.numel() == 0:
+        return {"logp": None, "mean_logp": None, "num_tokens": 0}
+    total = float(selected.sum().detach().cpu())
+    count = int(selected.numel())
+    return {"logp": total, "mean_logp": total / count, "num_tokens": count}
+
+
+def _score_pair_logps_hf(
+    policy: Any,
+    pairs: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    show_progress: bool,
+) -> list[dict[str, Any]]:
+    if not all(hasattr(policy, attr) for attr in ("model", "tokenizer", "torch")):
+        raise RuntimeError("--compute-pair-logps currently requires --backend hf.")
+    model = policy.model
+    tokenizer = policy.tokenizer
+    torch_mod = policy.torch
+    model.eval()
+    max_length = int((config.get("training") or {}).get("max_length", 2048))
+    rows: list[dict[str, Any]] = []
+    iterator = make_progress(pairs, total=len(pairs), desc="score pair logps", unit="pair", disable=not show_progress)
+    for pair in iterator:
+        prompt_messages = list(pair.get("prompt_messages") or [])
+        chosen_messages = list(pair.get("chosen_messages") or [])
+        rejected_messages = list(pair.get("rejected_messages") or [])
+        chosen = _completion_logp(
+            model=model,
+            tokenizer=tokenizer,
+            torch_mod=torch_mod,
+            prompt_messages=prompt_messages,
+            completion_messages=chosen_messages,
+            max_length=max_length,
+        )
+        rejected = _completion_logp(
+            model=model,
+            tokenizer=tokenizer,
+            torch_mod=torch_mod,
+            prompt_messages=prompt_messages,
+            completion_messages=rejected_messages,
+            max_length=max_length,
+        )
+        chosen_logp = chosen["logp"]
+        rejected_logp = rejected["logp"]
+        margin = None if chosen_logp is None or rejected_logp is None else chosen_logp - rejected_logp
+        rows.append(
+            {
+                "pair_id": pair.get("pair_id"),
+                "example_id": pair.get("example_id"),
+                "dataset": pair.get("dataset"),
+                "chosen_action": pair.get("chosen_action"),
+                "rejected_action": pair.get("rejected_action"),
+                "chosen_logp": chosen_logp,
+                "rejected_logp": rejected_logp,
+                "chosen_mean_logp": chosen["mean_logp"],
+                "rejected_mean_logp": rejected["mean_logp"],
+                "chosen_num_tokens": chosen["num_tokens"],
+                "rejected_num_tokens": rejected["num_tokens"],
+                "logp_margin": margin,
+                "chosen_logp_gt_rejected": (margin is not None and margin > 0),
+            }
+        )
+    return rows
+
+
+def _load_reference_logps(path: str | None) -> dict[str, dict[str, Any]]:
+    if not path:
+        return {}
+    rows = read_jsonl(Path(path))
+    by_pair_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("pair_id") or "")
+        if key:
+            by_pair_id[key] = row
+    return by_pair_id
+
+
+def _attach_reward_margins(
+    rows: list[dict[str, Any]],
+    reference_rows: dict[str, dict[str, Any]],
+    *,
+    beta: float,
+) -> None:
+    for row in rows:
+        reference = reference_rows.get(str(row.get("pair_id") or ""))
+        if not reference:
+            continue
+        if any(row.get(key) is None for key in ("chosen_logp", "rejected_logp")):
+            continue
+        if any(reference.get(key) is None for key in ("chosen_logp", "rejected_logp")):
+            continue
+        chosen_reward = beta * (float(row["chosen_logp"]) - float(reference["chosen_logp"]))
+        rejected_reward = beta * (float(row["rejected_logp"]) - float(reference["rejected_logp"]))
+        row["reference_chosen_logp"] = reference.get("chosen_logp")
+        row["reference_rejected_logp"] = reference.get("rejected_logp")
+        row["reward_chosen"] = chosen_reward
+        row["reward_rejected"] = rejected_reward
+        row["reward_margin"] = chosen_reward - rejected_reward
+        row["reward_margin_positive"] = row["reward_margin"] > 0
+
+
+def _summarize_pair_logps(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    valid = [row for row in rows if row.get("logp_margin") is not None]
+    reward_valid = [row for row in rows if row.get("reward_margin") is not None]
+    chosen_gt = sum(1 for row in valid if row.get("chosen_logp_gt_rejected"))
+    reward_pos = sum(1 for row in reward_valid if row.get("reward_margin_positive"))
+    return {
+        "num_pairs": len(rows),
+        "valid_logp_pairs": len(valid),
+        "chosen_gt_rejected_count": chosen_gt,
+        "chosen_gt_rejected_rate": _rate(chosen_gt, len(valid)),
+        "logp_margin": _summarize_numeric([float(row["logp_margin"]) for row in valid]),
+        "chosen_logp": _summarize_numeric([float(row["chosen_logp"]) for row in valid if row.get("chosen_logp") is not None]),
+        "rejected_logp": _summarize_numeric([float(row["rejected_logp"]) for row in valid if row.get("rejected_logp") is not None]),
+        "chosen_mean_logp": _summarize_numeric([float(row["chosen_mean_logp"]) for row in valid if row.get("chosen_mean_logp") is not None]),
+        "rejected_mean_logp": _summarize_numeric([float(row["rejected_mean_logp"]) for row in valid if row.get("rejected_mean_logp") is not None]),
+        "valid_reward_pairs": len(reward_valid),
+        "reward_margin_positive_count": reward_pos,
+        "reward_margin_positive_rate": _rate(reward_pos, len(reward_valid)),
+        "reward_margin": _summarize_numeric([float(row["reward_margin"]) for row in reward_valid]),
+    }
+
+
+def _summarize_pair_logps_with_datasets(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_dataset = {
+        dataset: _summarize_pair_logps([row for row in rows if row.get("dataset") == dataset])
+        for dataset in sorted({str(row.get("dataset")) for row in rows if row.get("dataset")})
+    }
+    return {"overall": _summarize_pair_logps(rows), "by_dataset": by_dataset}
+
+
 def _judgment_value_by_id(judgments: list[dict[str, Any]], key: str) -> dict[str, Any]:
     return {
         str(item.get("example_id")): item.get(key)
@@ -603,6 +974,8 @@ def main() -> None:
     parser.add_argument("--skip-mintqa-teacher-judge", action="store_true")
     parser.add_argument("--skip-in3-teacher-judge", action="store_true")
     parser.add_argument("--skip-or-bench-teacher-judge", action="store_true")
+    parser.add_argument("--compute-pair-logps", action="store_true", help="Teacher-force score DPO chosen/rejected completions under the evaluated HF policy.")
+    parser.add_argument("--reference-logp-file", type=str, default=None, help="Optional pair_logps.jsonl from a reference policy for DPO reward_margin calculation.")
     parser.add_argument("--no-progress", action="store_true")
     args = parser.parse_args()
 
@@ -611,16 +984,30 @@ def main() -> None:
         config.setdefault("eval", {})["tool_finalize_depth"] = max(1, int(args.tool_finalize_depth))
     dataset_filter = {item.strip() for item in args.datasets.split(",") if item.strip()}
     pair_paths = [Path(path) for path in args.pair_files]
+    pair_records = _load_pair_records(pair_paths, dataset_filter)
     ids_by_dataset = _load_pair_ids(pair_paths, dataset_filter)
-    pair_by_example_id = _load_pair_records_by_example_id(pair_paths, dataset_filter)
     examples = _load_examples_for_pair_ids(config, ids_by_dataset)
+    examples_by_id = {str(example.example_id): example for example in examples}
+    pair_by_eval_key: dict[str, dict[str, Any]] = {}
+    for pair in pair_records:
+        pair_id = str(pair.get("pair_id") or "")
+        example_id = str(pair.get("example_id") or "")
+        if pair_id:
+            pair_by_eval_key[pair_id] = pair
+        if example_id and example_id not in pair_by_eval_key:
+            pair_by_eval_key[example_id] = pair
+    eval_items: list[tuple[dict[str, Any], Any]] = []
+    for pair in pair_records:
+        example_id = str(pair.get("example_id") or "")
+        if example_id not in examples_by_id:
+            raise RuntimeError(f"Could not recover example for pair {pair.get('pair_id')}: {example_id}")
+        eval_items.append((pair, examples_by_id[example_id]))
     policy = _build_raw_policy(config, args)
     eval_prompt_mode = str(config.get("rollout", {}).get("prompt_mode", "decision_window")).lower()
 
     records: list[dict[str, Any]] = []
-    progress = make_progress(examples, total=len(examples), desc="eval dpo pairs", unit="sample", disable=args.no_progress)
-    for example in progress:
-        pair = pair_by_example_id.get(str(example.example_id))
+    progress = make_progress(eval_items, total=len(eval_items), desc="eval dpo pairs", unit="pair", disable=args.no_progress)
+    for pair, example in progress:
         state_reasoning_attempt = _pair_reasoning_attempt(pair) if eval_prompt_mode == "decision_window" else ""
         record = rollout_one_example(
             example,
@@ -629,8 +1016,14 @@ def main() -> None:
             policy=policy,
             reasoning_attempt=state_reasoning_attempt,
         )
+        metadata = pair.get("metadata") or {}
         record["eval_prompt_mode"] = eval_prompt_mode
         record["state_reasoning_attempt"] = state_reasoning_attempt
+        record["eval_pair_id"] = pair.get("pair_id")
+        record["pair_chosen_action"] = pair.get("chosen_action")
+        record["pair_rejected_action"] = pair.get("rejected_action")
+        record["pair_chosen_u_rel"] = metadata.get("chosen_u_rel")
+        record["pair_rejected_u_rel"] = metadata.get("rejected_u_rel")
         records.append(record)
         try:
             progress.set_postfix(dataset=example.dataset, records=len(records))
@@ -679,24 +1072,59 @@ def main() -> None:
         )
         write_jsonl(output_dir / "or_bench_teacher_judgments.jsonl", or_bench_judgments)
 
+    pair_logp_rows: list[dict[str, Any]] = []
+    pair_logp_metrics: dict[str, Any] | None = None
+    pair_logp_path: Path | None = None
+    if args.compute_pair_logps:
+        ordered_pairs = pair_records
+        pair_logp_rows = _score_pair_logps_hf(
+            policy,
+            ordered_pairs,
+            config,
+            show_progress=not args.no_progress,
+        )
+        beta = float((config.get("training") or {}).get("beta", 0.1))
+        _attach_reward_margins(
+            pair_logp_rows,
+            _load_reference_logps(args.reference_logp_file),
+            beta=beta,
+        )
+        pair_logp_path = output_dir / "pair_logps.jsonl"
+        write_jsonl(pair_logp_path, pair_logp_rows)
+        pair_logp_metrics = _summarize_pair_logps_with_datasets(pair_logp_rows)
+        pair_logp_metrics["beta"] = beta
+        pair_logp_metrics["reference_logp_file"] = args.reference_logp_file
+        write_json(output_dir / "pair_logp_metrics.json", pair_logp_metrics)
+
     metrics = _summarize_records(
         records,
         mintqa_judgments=mintqa_judgments,
         in3_judgments=in3_judgments,
         or_bench_judgments=or_bench_judgments,
     )
+    alignment_metrics = _summarize_alignment_records(records, pair_by_eval_key)
+    alignment_metrics_by_dataset = {
+        dataset: _summarize_alignment_records(
+            [record for record in records if record.get("dataset") == dataset],
+            pair_by_eval_key,
+        )
+        for dataset in sorted({str(record.get("dataset")) for record in records})
+    }
+
     metrics.update(
         {
             "pair_files": [str(path) for path in pair_paths],
             "datasets": sorted(ids_by_dataset),
             "ids_by_dataset": {dataset: len(ids) for dataset, ids in ids_by_dataset.items()},
+            "num_eval_pairs": len(pair_records),
+            "num_unique_examples": len(examples),
             "rollout_output": str(rollout_path),
             "rollouts_by_dataset": by_dataset_paths,
             "mintqa_teacher_judgments": str(output_dir / "mintqa_teacher_judgments.jsonl") if mintqa_judgments else None,
             "in3_clarify_teacher_judgments": str(output_dir / "in3_clarify_teacher_judgments.jsonl") if in3_judgments else None,
             "or_bench_teacher_judgments": str(output_dir / "or_bench_teacher_judgments.jsonl") if or_bench_judgments else None,
             "search_backend": config.get("tools", {}).get("search", {}).get("eval_backend"),
-            "serper_api_key_available": bool(os.environ.get(str(config.get("tools", {}).get("search", {}).get("serper_api_key_env", "SERPER_API_KEY")))),
+            "serper_api_key_available": _serper_api_key_available(config),
             "tool_finalize_depth": int(config.get("eval", {}).get("tool_finalize_depth", 1)),
             "eval_prompt_mode": eval_prompt_mode,
             "state_conditioned_reasoning_source": "dpo_pair.metadata.state_reasoning_attempt"
@@ -708,6 +1136,10 @@ def main() -> None:
                     (config.get("tools", {}).get("calculator", {}) or {}).get("backend", "python_sandbox"),
                 )
             ),
+            "alignment_metrics": alignment_metrics,
+            "alignment_metrics_by_dataset": alignment_metrics_by_dataset,
+            "pair_logps": str(pair_logp_path) if pair_logp_path else None,
+            "pair_logp_metrics": pair_logp_metrics,
         }
     )
     write_json(output_dir / "eval_dpo_raw_single_action_metrics.json", metrics)

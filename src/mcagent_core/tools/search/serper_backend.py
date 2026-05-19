@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from mcagent_core.tools.search.online_backend_utils import build_online_observation, http_post_json, require_api_key
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 class SerperBackend:
     name = "serper"
@@ -13,6 +17,10 @@ class SerperBackend:
         self.phase = phase
         self.endpoint = str(config.get("serper_base_url", "https://google.serper.dev/search"))
         self.api_key_env = str(config.get("serper_api_key_env", "SERPER_API_KEY"))
+        self.api_key = str(config.get("serper_api_key") or config.get("api_key") or "").strip()
+        if not self.api_key and self.api_key_env and not _ENV_NAME_RE.fullmatch(self.api_key_env):
+            self.api_key = self.api_key_env
+            self.api_key_env = "SERPER_API_KEY"
         self.timeout_seconds = float(config.get("online_timeout_seconds", 30.0))
 
     def run(self, action_input: dict[str, Any], sample, history: list[dict[str, Any]]) -> tuple[dict[str, Any], bool, dict[str, Any]]:
@@ -26,7 +34,7 @@ class SerperBackend:
         response = http_post_json(
             self.endpoint,
             payload,
-            headers={"X-API-KEY": require_api_key(self.api_key_env)},
+            headers={"X-API-KEY": self.api_key or require_api_key(self.api_key_env)},
             timeout_seconds=self.timeout_seconds,
         )
         rows = []

@@ -7,7 +7,7 @@ Available actions:
 - SEARCH: retrieve external factual evidence
 - CALCULATE: compute arithmetic or symbolic expressions
 - CLARIFY: ask for missing critical user information
-- REFUSE: decline when the request is unsupported, false-premise, unsafe, or cannot be responsibly completed
+- REFUSE: decline only when the user request itself is unsafe, harmful, or disallowed
 
 Hard rules:
 1. Choose exactly one action from the currently allowed actions.
@@ -21,6 +21,7 @@ Hard rules:
 9. If `decision.action` is CALCULATE, use `action_input.expression`.
 10. If `decision.action` is CLARIFY, use `action_input.question`.
 11. If `decision.action` is REFUSE, use `action_input.reason`.
+12. Do not use REFUSE for missing evidence, tool failure, uncertainty, unsupported claims, or false premises unless the user is asking for unsafe or harmful compliance.
 
 ## Action payload rules
 
@@ -41,7 +42,7 @@ Soft guidance:
 14. Prefer SEARCH only when external or up-to-date evidence is genuinely needed.
 15. Prefer CALCULATE only when a concrete computation would materially reduce error.
 16. Prefer CLARIFY only when a missing slot blocks a useful answer.
-17. Prefer REFUSE only when the request is false-premise, unsupported, unsafe, or cannot be responsibly grounded.
+17. Prefer REFUSE only when the request is unsafe, harmful, or disallowed; otherwise use ANSWER with caveats, SEARCH, CALCULATE, or CLARIFY when allowed.
 
 Return JSON with the following schema:
 ```

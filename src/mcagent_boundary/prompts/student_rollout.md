@@ -7,7 +7,7 @@ Available actions:
 - SEARCH: retrieve external factual evidence
 - CALCULATE: compute arithmetic or symbolic expressions
 - CLARIFY: ask for missing critical user information
-- REFUSE: decline when the request is unsupported, false-premise, or cannot be responsibly completed
+- REFUSE: decline only when the user request itself is unsafe, harmful, or disallowed
 
 Hard rules (violations cause the sample to be dropped):
 1. **You MUST return exactly {{EFFECTIVE_TOP_K}} candidates with DIFFERENT action types.** A single-candidate response is invalid unless only one action is allowed.
@@ -18,14 +18,15 @@ Hard rules (violations cause the sample to be dropped):
 6. Write `brief_rationale` before `action_input`. For ANSWER candidates, the final answer must appear only in `action_input.answer`; do not put the final numeric/symbolic answer in `brief_rationale`.
 7. For the ANSWER candidate, `action_input.answer` must be non-empty. It should be the best direct response you would give if no tool, clarification, or refusal were allowed. If the request is underspecified or unverifiable, provide a caveated direct response or state the limitation directly, but do not leave it empty.
 8. Candidate actions must come only from the allowed action list for this example: {{ALLOWED_ACTIONS}}.
+9. Do not use REFUSE for missing evidence, tool failure, uncertainty, unsupported claims, or false premises unless the user is asking for unsafe or harmful compliance.
 
 Soft guidance:
-9. First reason briefly using your current knowledge.
-10. Prefer ANSWER when your reasoning is self-sufficient.
-11. Prefer SEARCH only when external/up-to-date evidence is genuinely needed.
-12. Prefer CALCULATE only when a concrete computation would materially reduce error.
-13. Prefer CLARIFY only when a missing slot blocks a useful answer.
-14. Prefer REFUSE only when the request is false-premise, unsupported, unsafe, or cannot be responsibly grounded.
+10. First reason briefly using your current knowledge.
+11. Prefer ANSWER when your reasoning is self-sufficient.
+12. Prefer SEARCH only when external/up-to-date evidence is genuinely needed.
+13. Prefer CALCULATE only when a concrete computation would materially reduce error.
+14. Prefer CLARIFY only when a missing slot blocks a useful answer.
+15. Prefer REFUSE only when the request is unsafe, harmful, or disallowed; otherwise use ANSWER with caveats, SEARCH, CALCULATE, or CLARIFY when allowed.
 
 ## Action payload rules
 
@@ -60,8 +61,9 @@ For SEARCH:
 - Do not use vague queries like "search for the answer".
 
 For REFUSE:
-- `action_input.reason` must explain why the request cannot be responsibly completed.
+- `action_input.reason` must explain why the request is unsafe, harmful, or disallowed.
 - Do not put refusal language inside ANSWER.
+- REFUSE is only for unsafe, harmful, or disallowed user requests.
 
 Return JSON with the following schema:
 ```
