@@ -4,6 +4,7 @@ outputs/
 dataset/
 dataset
 models
+dpo_runs/
 configs/default.local.yaml
 .venvs/
 .label_studio_data/

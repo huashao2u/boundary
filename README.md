@@ -299,8 +299,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evi
 - completion reflection 优先使用 teacher 的 `candidate_reflection`，避免在 rejected completion 中写入
   `lower utility` / `rejected` / `worse` 等显式负面 marker。
 - pair 选择仍来自 top-k rollout candidates，但 DPO 样本默认采用
-  `decision_window`（state-conditioned action alignment）：prompt 使用原系统 prompt、题目、允许动作和
-  rollout 中 student 原始 `reasoning_attempt` 作为固定 state；completion 只补全根级 action JSON
+  `decision_window`（state-conditioned action alignment）：prompt 使用专用的
+  `student_decision_window.md`、题目、允许动作和 rollout 中 student 原始 `reasoning_attempt`
+  作为固定 state；completion 只补全根级 action JSON
   `{action, confidence, brief_rationale, action_input}`。训练样本只到 action emission，不执行
   search/calculator/clarify/refuse 工具，也不包含 tool observation/finalize。
 - 默认启用 pair augmentation，以覆盖更细的 decision-window：
@@ -405,7 +406,9 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/06_train_dpo.py --smoke
 
 读取 `datasets.eval`，执行 eval-side rollout 和动作/任务/校准指标。默认使用
 `decision_window`，即与 DPO 主线一致：题目 + 允许动作 + 原始 `reasoning_attempt` state -> action
-decision。端到端 single-action eval 可显式传 `--prompt-mode end_to_end` / `single_action`。
+decision。该模式使用专用 root-only action prompt，避免与 end-to-end 的
+`{reasoning, decision}` schema 冲突。端到端 single-action eval 可显式传
+`--prompt-mode end_to_end` / `single_action`。
 当前 `rollout.yaml` 中 eval 数据集为空；TruthfulQA / RealTimeQA adapter 只是未来扩展 hook。
 
 ```bash
@@ -460,7 +463,55 @@ vLLM 配置：
 rollout:
   vllm_gpu_memory_utilization: 0.85
   vllm_max_model_len: 4096
+  vllm_tensor_parallel_size: 1
+  vllm_pipeline_parallel_size: 1
 ```
 
+`vllm_tensor_parallel_size: 1` 是单卡默认值。24G RTX 3090 上如遇 prompt logprob / KV cache
+显存不足，可在同一个 vLLM 实例内使用 tensor parallel：
+
+```bash
+# 单卡，默认兼容路径
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
+  --backend vllm --datasets gsm8k --limit-per-dataset 10
+
+# 2 卡 3090
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
+  --backend vllm --datasets gsm8k --limit-per-dataset 10 \
+  --vllm-tensor-parallel-size 2
+
+# 4 卡 3090
+CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=src python3 src/mcagent_boundary/scripts/02_rollout_all.py \
+  --backend vllm --datasets gsm8k --limit-per-dataset 10 \
+  --vllm-tensor-parallel-size 4
+```
+
+`02_rollout_all.py`、`07_eval.py`、`07b_eval_dpo_pairs.py`、`07c_eval_test_examples.py`
+都支持 `--vllm-tensor-parallel-size`、`--vllm-pipeline-parallel-size`、
+`--vllm-gpu-memory-utilization`、`--vllm-max-model-len`。`01/02b/03/04/04b/08`
+主要是 CPU、I/O 或 API 并发脚本，不使用 GPU 多卡。
+
 在 96G 显卡上，`0.85` 会让 vLLM 预留约 80G 显存作为权重与 KV cache 池，这是预分配行为。
-不要在单卡上并行启动多套 vLLM 脚本；如需加速，应优先在单个 vLLM 实例内做 batched rollout。
+在 24G 3090 上，2/4 卡 tensor parallel 比单卡更稳；如果仍然 OOM，可先把
+`--vllm-gpu-memory-utilization` 降到 `0.70` 到 `0.80`，或临时关闭
+`rollout.candidate_logprob_scoring.enabled` 以确认纯生成链路。
+
+不要在同一组 GPU 上并行启动多套 vLLM 脚本；如需加速，应优先在单个 vLLM 实例内做 batched
+rollout 或 tensor parallel。
+
+训练脚本 `05_optional_warmup.py --run-training` 和 `06_train_dpo.py` 使用 TRL/Accelerate。
+单卡直接运行脚本；2/4 卡用 `torchrun` 启动，每个进程一张卡：
+
+```bash
+# 2 卡 DPO
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH=src torchrun --nproc_per_node=2 \
+  src/mcagent_boundary/scripts/06_train_dpo.py --smoke
+
+# 4 卡 DPO
+CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=src torchrun --nproc_per_node=4 \
+  src/mcagent_boundary/scripts/06_train_dpo.py --smoke
+```
+
+多卡训练的全局 batch 约等于
+`per_device_train_batch_size * gradient_accumulation_steps * nproc_per_node`。换卡数时如需保持相同
+全局 batch，应相应调低 `gradient_accumulation_steps` 或 `per_device_train_batch_size`。

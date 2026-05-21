@@ -38,6 +38,10 @@ def main() -> None:
         default=None,
         help="Override rollout.max_new_tokens for this run.",
     )
+    parser.add_argument("--vllm-tensor-parallel-size", type=int, default=None)
+    parser.add_argument("--vllm-pipeline-parallel-size", type=int, default=None)
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=None)
+    parser.add_argument("--vllm-max-model-len", type=int, default=None)
     parser.add_argument(
         "--datasets",
         type=str,
@@ -70,6 +74,14 @@ def main() -> None:
         config["rollout"]["backend"] = args.backend
     if args.max_new_tokens is not None:
         config["rollout"]["max_new_tokens"] = args.max_new_tokens
+    if args.vllm_tensor_parallel_size is not None:
+        config["rollout"]["vllm_tensor_parallel_size"] = args.vllm_tensor_parallel_size
+    if args.vllm_pipeline_parallel_size is not None:
+        config["rollout"]["vllm_pipeline_parallel_size"] = args.vllm_pipeline_parallel_size
+    if args.vllm_gpu_memory_utilization is not None:
+        config["rollout"]["vllm_gpu_memory_utilization"] = args.vllm_gpu_memory_utilization
+    if args.vllm_max_model_len is not None:
+        config["rollout"]["vllm_max_model_len"] = args.vllm_max_model_len
     dataset_names = (
         [item.strip() for item in args.datasets.split(",") if item.strip()]
         if args.datasets

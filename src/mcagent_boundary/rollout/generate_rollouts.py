@@ -146,6 +146,9 @@ def generate_rollouts(
             if rollout_cfg.get("vllm_max_model_len") is not None
             else None
         ),
+        vllm_tensor_parallel_size=int(rollout_cfg.get("vllm_tensor_parallel_size", 1)),
+        vllm_pipeline_parallel_size=int(rollout_cfg.get("vllm_pipeline_parallel_size", 1)),
+        repetition_penalty=float(rollout_cfg.get("repetition_penalty", 1.0)),
         top_k_actions=int(rollout_cfg.get("top_k_actions", 3)),
         candidate_logprob_scoring=dict(rollout_cfg.get("candidate_logprob_scoring") or {}),
         adapter_path=_resolve_adapter_path(config),

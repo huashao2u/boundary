@@ -260,6 +260,11 @@ def run_step_dpo(
         bf16=bool(training_cfg.get("bf16", False)),
         fp16=bool(training_cfg.get("fp16", False)),
         gradient_checkpointing=bool(training_cfg.get("gradient_checkpointing", True)),
+        ddp_find_unused_parameters=(
+            bool(training_cfg["ddp_find_unused_parameters"])
+            if training_cfg.get("ddp_find_unused_parameters") is not None
+            else None
+        ),
     )
     trainer_cls = _make_weighted_dpo_trainer(DPOTrainer) if use_sample_weights else DPOTrainer
     data_collator = _make_weighted_preference_collator(dpo_args, tokenizer) if use_sample_weights else None

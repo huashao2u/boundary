@@ -8,6 +8,10 @@ export PYTHONPATH="${PYTHONPATH:+${PYTHONPATH}:}src"
 
 DATASETS="${DATASETS:-gsm8k,math,in3,mintqa,or_bench}"
 BACKEND="${BACKEND:-vllm}"
+VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-1}"
+VLLM_PIPELINE_PARALLEL_SIZE="${VLLM_PIPELINE_PARALLEL_SIZE:-1}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-}"
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-}"
 TEACHER_WORKERS="${TEACHER_WORKERS:-8}"
 TEACHER_RPM_LIMIT="${TEACHER_RPM_LIMIT:-240}"
 INCLUDE_CLEAR_ANSWER="${INCLUDE_CLEAR_ANSWER:-1}"
@@ -153,6 +157,8 @@ run_dir: ${RUN_DIR}
 datasets: ${DATASETS}
 selection_preset: ${SELECTION_PRESET}
 backend: ${BACKEND}
+vllm_tensor_parallel_size: ${VLLM_TENSOR_PARALLEL_SIZE}
+vllm_pipeline_parallel_size: ${VLLM_PIPELINE_PARALLEL_SIZE}
 stop_after: ${STOP_AFTER}
 teacher_workers: ${TEACHER_WORKERS}
 teacher_rpm_limit: ${TEACHER_RPM_LIMIT}
@@ -169,14 +175,26 @@ run_stage \
     --full-dataset \
     --selection-preset "$SELECTION_PRESET"
 
+rollout_args=(
+  src/mcagent_boundary/scripts/02_rollout_all.py
+  --backend "$BACKEND"
+  --datasets "$DATASETS"
+  --full-dataset
+  --selection-preset "$SELECTION_PRESET"
+  --vllm-tensor-parallel-size "$VLLM_TENSOR_PARALLEL_SIZE"
+  --vllm-pipeline-parallel-size "$VLLM_PIPELINE_PARALLEL_SIZE"
+  --output-dir "$RUN_DIR"
+)
+if [[ -n "$VLLM_GPU_MEMORY_UTILIZATION" ]]; then
+  rollout_args+=(--vllm-gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION")
+fi
+if [[ -n "$VLLM_MAX_MODEL_LEN" ]]; then
+  rollout_args+=(--vllm-max-model-len "$VLLM_MAX_MODEL_LEN")
+fi
+
 run_stage \
   "02_rollout_all" \
-  python3 src/mcagent_boundary/scripts/02_rollout_all.py \
-    --backend "$BACKEND" \
-    --datasets "$DATASETS" \
-    --full-dataset \
-    --selection-preset "$SELECTION_PRESET" \
-    --output-dir "$RUN_DIR"
+  python3 "${rollout_args[@]}"
 
 if [[ "$STOP_AFTER" == "rollout" ]]; then
   notify "[boundary] rollout pipeline finished (${RUN_ID})" "Finished adapter build and rollout/mining only.

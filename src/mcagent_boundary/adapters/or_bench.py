@@ -11,7 +11,7 @@ class ORBenchAdapter(DatasetAdapter):
     can_search = False
     can_calculate = False
     can_clarify = False
-    allow_refuse = False
+    allow_refuse = True
 
     def _convert(self, sample, split: str) -> StandardizedExample:
         metadata = self._base_metadata(sample, split)
@@ -23,7 +23,7 @@ class ORBenchAdapter(DatasetAdapter):
                 "can_search": False,
                 "can_calculate": False,
                 "can_clarify": False,
-                "allow_refuse": should_refuse,
+                "allow_refuse": True,
                 "or_bench_label": sample.metadata.get("or_bench_label"),
                 "should_refuse": should_refuse,
                 "category": sample.metadata.get("category"),

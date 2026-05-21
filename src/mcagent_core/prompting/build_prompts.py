@@ -156,12 +156,38 @@ def build_state_prompt(prompt_text: str, reason_prefix: str) -> str:
     )
 
 
-def _keyword_fallback_action(raw_text: str) -> str:
-    upper = raw_text.upper()
-    for action in ALLOWED_ACTIONS:
-        if action in upper:
-            return action
-    return "ANSWER"
+def _parse_failed_decision(raw_text: str, reason: str = "parse_failed") -> dict[str, Any]:
+    return {
+        "reason": "",
+        "parse_error": reason,
+        "parse_failed": True,
+        "decision": {
+            "action": None,
+            "confidence": None,
+            "action_input": {},
+            "brief_rationale": reason,
+        },
+    }
+
+
+def _single_decision_payload(raw_text: str) -> dict[str, Any] | None:
+    stripped = raw_text.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Prefer the last complete JSON object. This avoids accepting prompt echoes
+    # or earlier examples when the model appends its actual answer at the end.
+    for span in reversed(_balanced_object_spans(raw_text)):
+        parsed = _parse_jsonish(span)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def parse_decision_output(raw_text: str) -> dict[str, Any]:
@@ -171,43 +197,20 @@ def parse_decision_output(raw_text: str) -> dict[str, Any]:
     ignores the v0.2 top-k candidate schema. Such records are excluded from
     mining/pair construction as invalid_candidate_output.
     """
-    parsed: dict[str, Any] | None = None
-    try:
-        from json_repair import repair_json
-
-        candidate = repair_json(raw_text, return_objects=True)
-        if isinstance(candidate, dict):
-            parsed = candidate
-    except Exception:
-        parsed = None
-
+    parsed = _single_decision_payload(raw_text)
     if parsed is None:
-        match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                parsed = None
-
-    if parsed is None:
-        action = _keyword_fallback_action(raw_text)
-        return {
-            "reason": raw_text.strip(),
-            "decision": {
-                "action": action,
-                "confidence": None,
-                "action_input": {},
-                "brief_rationale": "Fallback parser selected the most likely action keyword.",
-            },
-        }
+        return _parse_failed_decision(raw_text)
 
     reasoning_raw = parsed.get("reasoning", {})
     if not isinstance(reasoning_raw, dict):
         reasoning_raw = {}
     decision = parsed.get("decision", parsed)
-    action = str(decision.get("action", "ANSWER")).upper()
+    if not isinstance(decision, dict):
+        return _parse_failed_decision(raw_text, "invalid_decision_schema")
+    action_raw = decision.get("action")
+    action = str(action_raw).upper() if action_raw is not None else ""
     if action not in ALLOWED_ACTIONS:
-        action = _keyword_fallback_action(raw_text)
+        return _parse_failed_decision(raw_text, "invalid_or_missing_action")
     action_input = decision.get("action_input", {}) or {}
     if not isinstance(action_input, dict):
         action_input = {}

@@ -48,6 +48,11 @@ def maybe_run_warmup_sft(
             dataset_text_field="text",
             bf16=bool(config["training"].get("bf16", False)),
             fp16=bool(config["training"].get("fp16", False)),
+            ddp_find_unused_parameters=(
+                bool(config["training"]["ddp_find_unused_parameters"])
+                if config["training"].get("ddp_find_unused_parameters") is not None
+                else None
+            ),
             report_to=list(config["training"].get("report_to", [])),
         ),
     )
@@ -66,4 +71,3 @@ def maybe_run_warmup_sft(
     )
     write_json(Path(output_dir) / "warmup_summary.json", summary)
     return summary
-

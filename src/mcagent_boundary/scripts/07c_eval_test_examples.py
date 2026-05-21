@@ -43,6 +43,10 @@ def main() -> None:
     parser.add_argument("--adapter-path", default=None)
     parser.add_argument("--candidate-temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--vllm-tensor-parallel-size", type=int, default=None)
+    parser.add_argument("--vllm-pipeline-parallel-size", type=int, default=None)
+    parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=None)
+    parser.add_argument("--vllm-max-model-len", type=int, default=None)
     parser.set_defaults(prompt_mode="end_to_end")
     parser.add_argument("--tool-finalize-depth", type=int, default=2)
     parser.add_argument("--teacher-judge-workers", type=int, default=8)
@@ -58,6 +62,14 @@ def main() -> None:
     config["rollout"]["prompt_mode"] = "single_action"
     config["rollout"]["candidate_temperature"] = args.candidate_temperature
     config["rollout"]["max_new_tokens"] = args.max_new_tokens
+    if args.vllm_tensor_parallel_size is not None:
+        config["rollout"]["vllm_tensor_parallel_size"] = args.vllm_tensor_parallel_size
+    if args.vllm_pipeline_parallel_size is not None:
+        config["rollout"]["vllm_pipeline_parallel_size"] = args.vllm_pipeline_parallel_size
+    if args.vllm_gpu_memory_utilization is not None:
+        config["rollout"]["vllm_gpu_memory_utilization"] = args.vllm_gpu_memory_utilization
+    if args.vllm_max_model_len is not None:
+        config["rollout"]["vllm_max_model_len"] = args.vllm_max_model_len
     config.setdefault("eval", {})["tool_finalize_depth"] = max(1, int(args.tool_finalize_depth))
     if args.adapter_path:
         config.setdefault("student", {})["adapter_path"] = args.adapter_path

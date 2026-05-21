@@ -66,7 +66,6 @@ For REFUSE:
 - REFUSE is only for unsafe, harmful, or disallowed user requests.
 
 Return JSON with the following schema:
-```
 {
   "reasoning": {
     "attempt": "short but substantive reasoning",
@@ -74,11 +73,11 @@ Return JSON with the following schema:
     "need_external_help": true
   },
   "candidates": [
-    {"rank": 1, "action": "...", "confidence": 0.0, "brief_rationale": "", "action_input": {}},
-    {"rank": 2, "action": "...", "confidence": 0.0, "brief_rationale": "", "action_input": {}},
-    ...
+    {"rank": 1, "action": "ANSWER", "confidence": 0.0, "brief_rationale": "", "action_input": {"answer": ""}},
+    {"rank": 2, "action": "SEARCH", "confidence": 0.0, "brief_rationale": "", "action_input": {"query": ""}}
   ]
 }
-```
+
+The schema above is illustrative. Your actual `candidates` array must contain exactly {{EFFECTIVE_TOP_K}} candidate objects with DIFFERENT allowed actions, and every required action_input value must be non-empty.
 
 Now respond for the user's question below. Remember: **exactly {{EFFECTIVE_TOP_K}} candidates with DIFFERENT allowed actions; ANSWER must appear; JSON only.**

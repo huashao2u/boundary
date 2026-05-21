@@ -45,7 +45,6 @@ Soft guidance:
 17. Prefer REFUSE only when the request is unsafe, harmful, or disallowed; otherwise use ANSWER with caveats, SEARCH, CALCULATE, or CLARIFY when allowed.
 
 Return JSON with the following schema:
-```
 {
   "reasoning": {
     "attempt": "short but substantive reasoning",
@@ -59,14 +58,12 @@ Return JSON with the following schema:
     "action_input": {}
   }
 }
-```
 
 ### General one-shot example
 
 **Question:** What is the derivative of x^3 + 2x with respect to x, evaluated at x = 4?
 
 **Valid output:**
-```json
 {
   "reasoning": {
     "attempt": "The derivative of x^3 is 3x^2 and of 2x is 2, so f'(x) = 3x^2 + 2. Evaluating at x = 4 can be done directly.",
@@ -80,6 +77,5 @@ Return JSON with the following schema:
     "action_input": {"answer": "50"}
   }
 }
-```
 
 Now respond for the user's question below. Remember: choose exactly one action, write `brief_rationale` before `action_input`, and return JSON only.

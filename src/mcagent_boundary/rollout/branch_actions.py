@@ -10,7 +10,7 @@ Annotation phase (annotation.execute_tools: false):
   - On invalid: write diagnostics, skip from training pool.
 
 Eval phase (eval.execute_tools: true):
-  - Execute tool, then run student finalize pass using student_finalize_after_tool.md.
+  - Execute tool, then run student finalize pass with a dataset-specific prompt.
   - Compute correctness against gold for U_real.
 
 Gold is NEVER injected into student action_input.
@@ -19,7 +19,6 @@ Debug fallback branches never enter training pairs (use_fallback_branches_for_tr
 
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from mcagent_boundary.envs.sandbox import BoundarySandbox
@@ -28,6 +27,8 @@ from mcagent_boundary.features.semantic_tags import infer_semantic_tag_details
 from mcagent_boundary.prompting.action_decision import (
     build_action_decision_prompt_text,
     build_decision_window_prompt_text,
+    build_finalize_after_tool_prompt_text,
+    build_rollout_system_prompt,
 )
 from mcagent_boundary.rollout.candidate_schema import (
     canonicalize_candidates,
@@ -39,11 +40,7 @@ from mcagent_boundary.scoring.helpfulness import outcome_helpfulness
 from mcagent_boundary.scoring.utility import utility_real
 
 
-PROMPT_ROOT = Path(__file__).resolve().parents[1] / "prompts"
 logger = logging.getLogger(__name__)
-
-def _read_prompt(name: str) -> str:
-    return (PROMPT_ROOT / name).read_text(encoding="utf-8")
 
 
 def effective_top_k_for_example(example, config: dict[str, Any] | None = None) -> int:
@@ -69,21 +66,22 @@ def build_student_prompt(
             allowed_actions=example.allowed_actions(),
             reasoning_attempt=str(reasoning_attempt or ""),
             can_clarify=bool(getattr(example, "can_clarify", False)),
+            dataset=str(getattr(example, "dataset", "")),
         )
     if prompt_mode in {"single", "single_action", "action_decision"}:
         return build_action_decision_prompt_text(
             question=example.question,
             allowed_actions=example.allowed_actions(),
             can_clarify=bool(getattr(example, "can_clarify", False)),
+            dataset=str(getattr(example, "dataset", "")),
         )
 
     allowed_actions = example.allowed_actions()
     effective_top_k = effective_top_k_for_example(example, config)
-    system_prompt = (
-        _read_prompt("student_rollout.md")
-        .strip()
-        .replace("{{EFFECTIVE_TOP_K}}", str(effective_top_k))
-        .replace("{{ALLOWED_ACTIONS}}", ", ".join(allowed_actions))
+    system_prompt = build_rollout_system_prompt(
+        dataset=str(getattr(example, "dataset", "")),
+        allowed_actions=allowed_actions,
+        effective_top_k=effective_top_k,
     )
     tool_list = ", ".join(
         action.lower() for action in allowed_actions if action != "ANSWER"
@@ -91,14 +89,13 @@ def build_student_prompt(
     allowed_block = "Current allowed actions for this example:\n" + "\n".join(
         f"- {action}" for action in allowed_actions
     )
-    example_block = _dynamic_student_examples(allowed_actions)
     user_prompt = (
         f"Question: {example.question}\n\n"
         f"Constraints:\n"
         f"- Tools allowed: {tool_list or 'none'}\n"
         f"- Clarify allowed: {str(example.can_clarify)}"
     )
-    return system_prompt + "\n\n" + allowed_block + example_block + "\n\n" + user_prompt
+    return system_prompt + "\n\n" + allowed_block + "\n\n" + user_prompt
 
 
 def _dynamic_student_examples(allowed_actions: list[str]) -> str:
@@ -240,7 +237,7 @@ def _allowed_finalize_actions(sample, observation: dict[str, Any] | None = None)
     if dataset in {"in3", "mintqa"}:
         allow_refuse = False
     elif dataset == "or_bench":
-        allow_refuse = bool(metadata.get("should_refuse", allow_refuse))
+        allow_refuse = True
     if allow_refuse and not _observation_indicates_failure(observation or {}):
         actions.append("REFUSE")
     return actions
@@ -274,21 +271,16 @@ def _run_finalize_pass(
 ) -> dict[str, Any]:
     """Run student finalize pass after tool observation (eval only)."""
     try:
-        finalize_prompt_text = _read_prompt("student_finalize_after_tool.md").strip()
-        obs_text = json.dumps(observation, ensure_ascii=False)
-        history_text = json.dumps(history or [], ensure_ascii=False)
         allowed_actions = _allowed_finalize_actions(sample, observation)
-        allowed_block = "Allowed final actions for this example:\n" + "\n".join(f"- {action}" for action in allowed_actions)
-        full_prompt = (
-            finalize_prompt_text + "\n\n"
-            f"Original question: {sample.question}\n\n"
-            f"{allowed_block}\n\n"
-            f"Previous action/observation history: {history_text}\n"
-            f"Prior finalize attempts: {_format_finalize_trace(trace)}\n"
-            f"Current action taken: {candidate['action']}\n"
-            f"Current action input: {json.dumps(candidate.get('action_input', {}), ensure_ascii=False)}\n"
-            f"Current tool observation: {obs_text}\n\n"
-            "Return JSON with reasoning and final_decision only."
+        full_prompt = build_finalize_after_tool_prompt_text(
+            question=sample.question,
+            allowed_actions=allowed_actions,
+            current_action=str(candidate["action"]),
+            current_action_input=candidate.get("action_input", {}),
+            current_observation=observation,
+            history=history,
+            trace=_format_finalize_trace(trace),
+            dataset=str(getattr(sample, "dataset", "")),
         )
         if hasattr(policy, "finalize_after_tool"):
             result = policy.finalize_after_tool(sample, candidate, observation, full_prompt)
@@ -514,13 +506,17 @@ def _build_eval_branches(
             final_answer = finalize_result.get("final_answer")
             final_status = finalize_result.get("final_status", f"completed_after_{action.lower()}")
             finalize_decision = finalize_result
-            valid_for_eval_scoring = final_status not in {"finalize_parse_failed", "finalize_disallowed_action"}
+            valid_for_eval_scoring = final_status not in {
+                "finalize_parse_failed",
+                "finalize_disallowed_action",
+                "finalize_empty_answer",
+            }
             if not valid_for_eval_scoring:
                 diagnostics.append({
                     "example_id": example_id,
                     "action": action,
                     "rank": candidate.get("rank"),
-                    "issue": "finalize_parse_failed",
+                    "issue": final_status,
                 })
         correctness = evaluate_branch_correctness(example, final_answer, action, semantic_tags)
         branches.append({

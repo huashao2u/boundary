@@ -59,7 +59,7 @@ def _allowed_actions_from_prompt(prompt_text: str) -> tuple[str, ...]:
     capture = False
     for line in prompt_text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("Current allowed actions for this example:"):
+        if stripped.startswith("Current allowed actions for this example:") or stripped.startswith("Current allowed actions:"):
             capture = True
             continue
         if capture:
@@ -95,11 +95,24 @@ def _effective_top_k_from_prompt(prompt_text: str, fallback: int) -> int:
 
 
 def _expects_single_action(prompt_text: str) -> bool:
+    lowered = prompt_text.lower()
+    if "choose exactly one action" not in lowered or '"candidates"' in prompt_text:
+        return False
     return (
-        "choose exactly one action" in prompt_text.lower()
-        and '"decision"' in prompt_text
-        and '"candidates"' not in prompt_text
+        '"decision"' in prompt_text
+        or "root-only schema" in lowered
+        or "decision-window action selector" in lowered
+        or "json root must contain" in lowered
     )
+
+
+def _generation_token_budget(prompt_text: str, configured_max_new_tokens: int) -> int:
+    """Keep single-action completions short so malformed long continuations do not dominate eval."""
+    if _expects_single_action(prompt_text):
+        if "decision-window action selector" in prompt_text.lower():
+            return min(configured_max_new_tokens, 256)
+        return min(configured_max_new_tokens, 512)
+    return configured_max_new_tokens
 
 
 def _candidate_from_single_decision(decision: dict[str, Any]) -> dict[str, Any]:
@@ -113,6 +126,29 @@ def _candidate_from_single_decision(decision: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_text_to_messages(prompt_text: str) -> list[dict[str, str]]:
+    stripped = str(prompt_text or "").strip()
+    lowered = stripped.lower()
+    if (
+        "decision-window action selector" in lowered
+        or "decision-window mode:" in lowered
+        or "finalize-after-tool mode:" in lowered
+        or "decision-aware assistant" in lowered
+    ):
+        markers = ["\n\nQuestion:", "\n\nOriginal question:"]
+        marker_index = -1
+        for marker in markers:
+            candidate_index = stripped.rfind(marker)
+            if candidate_index > marker_index:
+                marker_index = candidate_index
+        if marker_index != -1:
+            system_part = stripped[:marker_index].strip()
+            user_part = stripped[marker_index + 2 :].strip()
+            if system_part and user_part:
+                return [
+                    {"role": "system", "content": system_part},
+                    {"role": "user", "content": user_part},
+                ]
+
     system_part, _, user_part = prompt_text.partition("\n\n")
     if not user_part:
         return [{"role": "user", "content": prompt_text}]
@@ -152,7 +188,10 @@ def _build_finalize_prompt(sample, decision: dict[str, Any], observation: dict[s
         f"Action input: {json.dumps(decision.get('action_input', {}), ensure_ascii=False)}\n"
         f"Tool observation: {json.dumps(observation, ensure_ascii=False)}\n\n"
         "If another tool action is strictly necessary and allowed, return SEARCH, CALCULATE, or CLARIFY with the required action_input.\n"
-        "For CALCULATE, action_input.expression must be a restricted Python math snippet whose printed output is the answer.\n\n"
+        "Use action_input.answer for ANSWER, action_input.query for SEARCH, action_input.expression for CALCULATE, "
+        "action_input.question for CLARIFY, and action_input.reason for REFUSE. Required values must be non-empty.\n"
+        "For CALCULATE, action_input.expression must be a restricted Python math snippet whose printed output is the answer.\n"
+        "Do not use markdown fences or prose outside JSON.\n\n"
         "Return JSON: {\"reasoning\":{\"attempt\":\"...\",\"observation_summary\":\"...\",\"remaining_uncertainty\":\"...\"},"
         "\"final_decision\":{\"action\":\"ANSWER|SEARCH|CALCULATE|CLARIFY|REFUSE\",\"confidence\":0.0,"
         "\"brief_rationale\":\"\",\"action_input\":{}}}"
@@ -206,6 +245,12 @@ def _parse_finalize_output(raw_text: str, *, default_action: str) -> dict[str, A
     }
     if action == "ANSWER":
         answer = action_input.get("answer") or action_input.get("final_answer") or action_input.get("response") or ""
+        if not str(answer).strip():
+            return {
+                **common,
+                "final_answer": "",
+                "final_status": "finalize_empty_answer",
+            }
         return {
             **common,
             "final_answer": str(answer),
@@ -430,14 +475,7 @@ class HFLocalPolicy:
         """
         if getattr(self.tokenizer, "chat_template", None) is None:
             return prompt_text
-        system_part, _, user_part = prompt_text.partition("\n\n")
-        if not user_part:
-            messages = [{"role": "user", "content": prompt_text}]
-        else:
-            messages = [
-                {"role": "system", "content": system_part},
-                {"role": "user", "content": user_part},
-            ]
+        messages = _prompt_text_to_messages(prompt_text)
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -447,7 +485,7 @@ class HFLocalPolicy:
         formatted_prompt = self._format_prompt_for_generation(prompt_text)
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)
         gen_kwargs: dict[str, Any] = {
-            "max_new_tokens": self.max_new_tokens,
+            "max_new_tokens": _generation_token_budget(prompt_text, self.max_new_tokens),
             "do_sample": self.candidate_temperature > 0.0,
         }
         if self.candidate_temperature > 0.0:
@@ -559,11 +597,19 @@ class VLLMLocalPolicy:
         candidate_top_k: int | None = None,
         gpu_memory_utilization: float = 0.85,
         max_model_len: int | None = None,
+        tensor_parallel_size: int = 1,
+        pipeline_parallel_size: int = 1,
+        repetition_penalty: float = 1.0,
         top_k_actions: int = 3,
         candidate_logprob_scoring: dict[str, Any] | None = None,
     ):
         from transformers import AutoTokenizer
         from vllm import LLM, SamplingParams
+
+        if tensor_parallel_size < 1:
+            raise ValueError(f"tensor_parallel_size must be >= 1, got {tensor_parallel_size!r}.")
+        if pipeline_parallel_size < 1:
+            raise ValueError(f"pipeline_parallel_size must be >= 1, got {pipeline_parallel_size!r}.")
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         llm_kwargs: dict[str, Any] = {
@@ -572,6 +618,8 @@ class VLLMLocalPolicy:
             "dtype": "auto",
             "gpu_memory_utilization": gpu_memory_utilization,
             "enable_prefix_caching": True,
+            "tensor_parallel_size": tensor_parallel_size,
+            "pipeline_parallel_size": pipeline_parallel_size,
         }
         if max_model_len is not None:
             llm_kwargs["max_model_len"] = max_model_len
@@ -581,6 +629,7 @@ class VLLMLocalPolicy:
         self.candidate_temperature = candidate_temperature
         self.candidate_top_p = candidate_top_p
         self.candidate_top_k = candidate_top_k
+        self.repetition_penalty = repetition_penalty
         self.top_k_actions = top_k_actions
         self.candidate_logprob_scoring = dict(candidate_logprob_scoring or {})
         if self.tokenizer.pad_token is None:
@@ -589,25 +638,22 @@ class VLLMLocalPolicy:
     def _format_prompt_for_generation(self, prompt_text: str) -> str:
         if getattr(self.tokenizer, "chat_template", None) is None:
             return prompt_text
-        system_part, _, user_part = prompt_text.partition("\n\n")
-        if not user_part:
-            messages = [{"role": "user", "content": prompt_text}]
-        else:
-            messages = [
-                {"role": "system", "content": system_part},
-                {"role": "user", "content": user_part},
-            ]
+        messages = _prompt_text_to_messages(prompt_text)
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
 
     def generate_decision(self, sample, prompt_text: str) -> PolicyOutput:
-        action_scores, action_probabilities = self._score_action_options(prompt_text)
+        if bool(self.candidate_logprob_scoring.get("score_action_options", False)):
+            action_scores, action_probabilities = self._score_action_options(prompt_text)
+        else:
+            action_scores, action_probabilities = {}, {}
         formatted_prompt = self._format_prompt_for_generation(prompt_text)
         sampling_kwargs: dict[str, Any] = {
-            "max_tokens": self.max_new_tokens,
+            "max_tokens": _generation_token_budget(prompt_text, self.max_new_tokens),
             "temperature": self.candidate_temperature,
             "top_p": self.candidate_top_p,
+            "repetition_penalty": self.repetition_penalty,
         }
         if self.candidate_top_k is not None:
             sampling_kwargs["top_k"] = self.candidate_top_k
@@ -691,6 +737,7 @@ class VLLMLocalPolicy:
         sampling_params = self.SamplingParams(
             max_tokens=min(self.max_new_tokens, 256),
             temperature=0.0,
+            repetition_penalty=self.repetition_penalty,
         )
         outputs = self.llm.generate([formatted_prompt], sampling_params, use_tqdm=False)
         decoded = outputs[0].outputs[0].text if outputs and outputs[0].outputs else ""
@@ -824,6 +871,9 @@ def build_policy(
     candidate_top_k: int | None = None,
     vllm_gpu_memory_utilization: float = 0.85,
     vllm_max_model_len: int | None = None,
+    vllm_tensor_parallel_size: int = 1,
+    vllm_pipeline_parallel_size: int = 1,
+    repetition_penalty: float = 1.0,
     top_k_actions: int = 3,
     candidate_logprob_scoring: dict[str, Any] | None = None,
     adapter_path: str | None = None,
@@ -849,6 +899,9 @@ def build_policy(
             candidate_top_k=candidate_top_k,
             gpu_memory_utilization=vllm_gpu_memory_utilization,
             max_model_len=vllm_max_model_len,
+            tensor_parallel_size=vllm_tensor_parallel_size,
+            pipeline_parallel_size=vllm_pipeline_parallel_size,
+            repetition_penalty=repetition_penalty,
             top_k_actions=top_k_actions,
             candidate_logprob_scoring=candidate_logprob_scoring,
         )

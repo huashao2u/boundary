@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import importlib.util
 import json
 from collections import Counter
 from tempfile import TemporaryDirectory
@@ -15,7 +16,17 @@ from mcagent_boundary.annotation.validate_teacher_evidence import (
 )
 from mcagent_boundary.adapters.base import StandardizedExample
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
-from mcagent_boundary.rollout.branch_actions import _score_eval_branches_real, build_student_prompt, rollout_one_example
+from mcagent_boundary.prompting.action_decision import (
+    build_decision_window_prompt_text,
+    build_finalize_after_tool_prompt_text,
+)
+from mcagent_boundary.evaluation.eval_actions import evaluate_actions
+from mcagent_boundary.rollout.branch_actions import (
+    _allowed_finalize_actions,
+    _score_eval_branches_real,
+    build_student_prompt,
+    rollout_one_example,
+)
 from mcagent_boundary.rollout.candidate_schema import canonicalize_candidate, valid_as_chosen, valid_as_rejected
 from mcagent_boundary.rollout.dataset_selection import (
     apply_selection_preset,
@@ -31,8 +42,18 @@ from mcagent_core.features.extract_process_features import extract_process_featu
 from mcagent_core.eval.evaluate_answers import is_answer_correct
 from mcagent_core.features.semantic_tags import build_semantic_tag_details_from_state
 from mcagent_core.prompting.build_prompts import parse_candidate_output, parse_decision_output
-from mcagent_core.rollout.policy import PolicyOutput
+from mcagent_core.rollout.policy import PolicyOutput, _parse_finalize_output, _prompt_text_to_messages
 from mcagent_core.tools.calculator_tool import CalculatorTool
+
+
+_EVAL_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "src" / "mcagent_boundary" / "scripts" / "07b_eval_dpo_pairs.py"
+_EVAL_SCRIPT_SPEC = importlib.util.spec_from_file_location("eval_dpo_pairs_for_tests", _EVAL_SCRIPT_PATH)
+assert _EVAL_SCRIPT_SPEC is not None and _EVAL_SCRIPT_SPEC.loader is not None
+_EVAL_SCRIPT = importlib.util.module_from_spec(_EVAL_SCRIPT_SPEC)
+_EVAL_SCRIPT_SPEC.loader.exec_module(_EVAL_SCRIPT)
+_summarize_in3 = _EVAL_SCRIPT._summarize_in3
+_summarize_or_bench = _EVAL_SCRIPT._summarize_or_bench
+_summarize_records = _EVAL_SCRIPT._summarize_records
 
 
 def _tags(question: str, **kwargs):
@@ -179,6 +200,217 @@ class V02FixTests(unittest.TestCase):
         self.assertEqual(parsed["reason"], "Need evidence.")
         self.assertEqual(parsed["uncertainty_summary"], "fresh fact")
         self.assertEqual(parsed["decision"]["action_input"], {"search_query": "example query"})
+
+    def test_single_decision_parser_rejects_keyword_only_text(self):
+        parsed = parse_decision_output("I will ANSWER directly because the prompt says SEARCH is allowed.")
+        self.assertTrue(parsed["parse_failed"])
+        self.assertEqual(parsed["reason"], "")
+        self.assertEqual(parsed["parse_error"], "parse_failed")
+        self.assertIsNone(parsed["decision"]["action"])
+
+    def test_single_decision_parser_prefers_last_balanced_json_object(self):
+        parsed = parse_decision_output(
+            """
+            Example: {"decision": {"action": "SEARCH", "action_input": {"query": "old"}}}
+            Final:
+            {"reason": "Use the final object.", "decision": {"action": "ANSWER", "confidence": 0.8, "action_input": {"answer": "done"}}}
+            """
+        )
+        self.assertNotIn("parse_failed", parsed)
+        self.assertEqual(parsed["decision"]["action"], "ANSWER")
+        self.assertEqual(parsed["decision"]["action_input"], {"answer": "done"})
+
+    def test_evaluate_actions_treats_null_action_as_failure(self):
+        metrics = evaluate_actions(
+            [
+                {
+                    "natural_action": None,
+                    "best_action_real": None,
+                    "natural_branch_real": {},
+                    "metadata": {"task_type": "refusal_boundary", "should_refuse": False},
+                }
+            ]
+        )
+        self.assertEqual(metrics["action_accuracy"], 0)
+        self.assertEqual(metrics["or_bench_refusal_action_accuracy"], 0)
+        self.assertEqual(metrics["action_counts"], {"NONE": 1})
+
+    def test_or_bench_finalize_space_always_includes_refuse(self):
+        sample = type(
+            "Sample",
+            (),
+            {
+                "dataset": "or_bench",
+                "metadata": {
+                    "dataset": "or_bench",
+                    "task_type": "refusal_boundary",
+                    "allow_refuse": False,
+                    "should_refuse": False,
+                },
+            },
+        )()
+        self.assertEqual(_allowed_finalize_actions(sample), ["ANSWER", "REFUSE"])
+
+    def test_decision_window_prompt_split_keeps_rules_in_system_message(self):
+        prompt = "\n\n".join(
+            [
+                "You are a decision-window action selector.",
+                "Hard rules:\n1. Choose exactly one action.\n2. Output valid JSON only.",
+                "Return exactly this root-only schema:\n{\"action\": \"<ONE_OF_CURRENT_ALLOWED_ACTIONS>\"}",
+                "Question: Should I answer?\n\nCurrent allowed actions:\n- ANSWER\n- REFUSE\n\nDecision-window mode: choose the next action from this fixed state.",
+            ]
+        )
+        messages = _prompt_text_to_messages(prompt)
+        self.assertEqual([message["role"] for message in messages], ["system", "user"])
+        self.assertIn("Hard rules:", messages[0]["content"])
+        self.assertIn("root-only schema", messages[0]["content"])
+        self.assertTrue(messages[1]["content"].startswith("Question:"))
+        self.assertIn("Current allowed actions:", messages[1]["content"])
+
+    def test_or_bench_decision_window_prompt_only_schemas_allowed_actions(self):
+        prompt = build_decision_window_prompt_text(
+            dataset="or_bench",
+            question="Write an article about responding to customer feedback.",
+            allowed_actions=["ANSWER", "REFUSE"],
+            reasoning_attempt="This appears benign.",
+            can_clarify=False,
+        )
+        messages = _prompt_text_to_messages(prompt)
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+        self.assertIn("OR-Bench", system)
+        self.assertIn('"action": "ANSWER|REFUSE"', system)
+        self.assertNotIn("action_input.question", system)
+        self.assertNotIn("action_input.query", system)
+        self.assertTrue(user.startswith("Question:"))
+        self.assertIn("Current allowed actions:", user)
+
+    def test_finalize_after_tool_prompt_is_dataset_specific_and_split(self):
+        prompt = build_finalize_after_tool_prompt_text(
+            dataset="gsm8k",
+            question="What is 3*4?",
+            allowed_actions=["ANSWER", "CALCULATE"],
+            current_action="CALCULATE",
+            current_action_input={"expression": "3*4"},
+            current_observation={"status": "ok", "result": "12"},
+        )
+        messages = _prompt_text_to_messages(prompt)
+        self.assertEqual([message["role"] for message in messages], ["system", "user"])
+        self.assertIn("GSM8K", messages[0]["content"])
+        self.assertIn("Finalize-after-tool guidance for GSM8K", messages[0]["content"])
+        self.assertIn('"action_input": {"answer": "final answer text"}', messages[0]["content"])
+        self.assertIn('"action": "ANSWER|CALCULATE"', messages[0]["content"])
+        self.assertNotIn("ANSWER|SEARCH|CALCULATE|CLARIFY|REFUSE", prompt)
+        self.assertTrue(messages[1]["content"].startswith("Original question:"))
+        self.assertIn("Current tool observation:", messages[1]["content"])
+
+    def test_finalize_answer_with_empty_action_input_is_failure(self):
+        parsed = _parse_finalize_output(
+            json.dumps(
+                {
+                    "reasoning": {
+                        "attempt": "The tool result is 8.",
+                        "observation_summary": "The result is 8.",
+                        "remaining_uncertainty": "None.",
+                    },
+                    "final_decision": {
+                        "action": "ANSWER",
+                        "confidence": 1.0,
+                        "brief_rationale": "The answer is 8.",
+                        "action_input": {},
+                    },
+                }
+            ),
+            default_action="CALCULATE",
+        )
+        self.assertEqual(parsed["final_status"], "finalize_empty_answer")
+        self.assertEqual(parsed["final_answer"], "")
+
+    def test_finalize_mintqa_prompt_has_answer_shot(self):
+        prompt = build_finalize_after_tool_prompt_text(
+            dataset="mintqa",
+            question="What occupation did Jane Doe have?",
+            allowed_actions=["ANSWER", "SEARCH"],
+            current_action="SEARCH",
+            current_action_input={"query": "Jane Doe occupation"},
+            current_observation={"results": ["Jane Doe was a botanist."]},
+        )
+        self.assertIn("Finalize-after-tool guidance for MintQA", prompt)
+        self.assertIn('"action_input": {"answer": "Jane Doe was a botanist and lecturer."}', prompt)
+
+    def test_api_judge_summaries_are_keyed_by_eval_pair_id(self):
+        records = [
+            {
+                "dataset": "in3",
+                "example_id": "in3-dup",
+                "eval_pair_id": "pair-a",
+                "natural_action": "CLARIFY",
+                "metadata": {"gold_clarify_question": "Which city?"},
+            },
+            {
+                "dataset": "in3",
+                "example_id": "in3-dup",
+                "eval_pair_id": "pair-b",
+                "natural_action": "CLARIFY",
+                "metadata": {"gold_clarify_question": "Which city?"},
+            },
+        ]
+        judgments = [
+            {"eval_key": "pair-a", "example_id": "in3-dup", "clarify_correct": True},
+            {"eval_key": "pair-b", "example_id": "in3-dup", "clarify_correct": False},
+        ]
+        summary = _summarize_in3(records, judgments)
+        self.assertEqual(summary["teacher_clarify_correct_count"], 1)
+        self.assertEqual(summary["teacher_clarify_correct_denom"], 2)
+
+    def test_or_bench_null_teacher_skip_not_in_behavior_denom(self):
+        records = [
+            {
+                "dataset": "or_bench",
+                "example_id": "or-1",
+                "eval_pair_id": "pair-null",
+                "natural_action": None,
+                "metadata": {"should_refuse": False},
+            }
+        ]
+        judgments = [
+            {
+                "eval_key": "pair-null",
+                "example_id": "or-1",
+                "behavior_correct": None,
+                "teacher_skipped": "null_response",
+            }
+        ]
+        summary = _summarize_or_bench(records, judgments)
+        self.assertEqual(summary["behavior_correct_denom"], 0)
+        self.assertEqual(summary["teacher_judge_skipped_count"], 1)
+
+    def test_mintqa_teacher_correct_uses_eval_pair_key_not_example_id(self):
+        records = [
+            {
+                "dataset": "mintqa",
+                "boundary_type": "factual",
+                "example_id": "mintqa-dup",
+                "eval_pair_id": "pair-a",
+                "natural_action": "ANSWER",
+                "natural_branch": {"final_answer": "A"},
+            },
+            {
+                "dataset": "mintqa",
+                "boundary_type": "factual",
+                "example_id": "mintqa-dup",
+                "eval_pair_id": "pair-b",
+                "natural_action": "ANSWER",
+                "natural_branch": {"final_answer": "B"},
+            },
+        ]
+        judgments = [
+            {"eval_key": "pair-a", "example_id": "mintqa-dup", "teacher_correct": True},
+            {"eval_key": "pair-b", "example_id": "mintqa-dup", "teacher_correct": False},
+        ]
+        summary = _summarize_records(records, mintqa_judgments=judgments)
+        self.assertEqual(summary["by_dataset"]["mintqa"]["final_correct_valid_count"], 1)
+        self.assertEqual(summary["by_dataset"]["mintqa"]["final_correct_valid_denom"], 2)
 
     def test_eval_natural_branch_uses_first_valid_candidate_after_filtering(self):
         branches = [

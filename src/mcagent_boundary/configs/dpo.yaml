@@ -94,6 +94,7 @@ training:
   bf16: false
   fp16: true
   gradient_checkpointing: true
+  ddp_find_unused_parameters: false
   smoke_max_steps: 2
   report_to: []
   use_sample_weights: true

@@ -68,6 +68,11 @@ def _record_reasoning_attempt(record: dict[str, Any]) -> str:
     return str(record.get("reasoning_attempt") or record.get("reason_prefix") or "").strip()
 
 
+def _record_dataset(record: dict[str, Any]) -> str:
+    metadata = dict(record.get("metadata") or {})
+    return str(record.get("dataset") or metadata.get("dataset") or metadata.get("legacy_dataset") or "")
+
+
 def _build_prompt_messages(record: dict[str, Any], config: dict[str, Any]) -> list[dict[str, str]]:
     """Build the same single-action prompt used by eval."""
     if _pair_prompt_mode(config) == "decision_window":
@@ -76,11 +81,13 @@ def _build_prompt_messages(record: dict[str, Any], config: dict[str, Any]) -> li
             allowed_actions=_allowed_actions_from_record(record),
             reasoning_attempt=_record_reasoning_attempt(record),
             can_clarify=_record_can_clarify(record),
+            dataset=_record_dataset(record),
         )
     return build_action_decision_prompt_messages(
         question=record["question"],
         allowed_actions=_allowed_actions_from_record(record),
         can_clarify=_record_can_clarify(record),
+        dataset=_record_dataset(record),
     )
 
 
@@ -108,7 +115,7 @@ def _allowed_actions_from_record(record: dict[str, Any]) -> list[str]:
             if dataset in {"in3", "mintqa"}:
                 enabled = False
             elif dataset == "or_bench":
-                enabled = bool(metadata.get("should_refuse", enabled))
+                enabled = True
         if enabled:
             actions.append(action)
     # Legacy fallback only: old records without action-space metadata used the
@@ -235,11 +242,13 @@ def _render_prompt_text(record: dict[str, Any], config: dict[str, Any]) -> str:
             allowed_actions=_allowed_actions_from_record(record),
             reasoning_attempt=_record_reasoning_attempt(record),
             can_clarify=_record_can_clarify(record),
+            dataset=_record_dataset(record),
         )
     return build_action_decision_prompt_text(
         question=record["question"],
         allowed_actions=_allowed_actions_from_record(record),
         can_clarify=_record_can_clarify(record),
+        dataset=_record_dataset(record),
     )
 
 
