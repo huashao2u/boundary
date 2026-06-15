@@ -1,0 +1,137 @@
+{
+  "merged_commonsenseqa_from": "/media/songyl/boundary/artifacts/rollout_v026_20260526T171000Z/by_dataset/commonsenseqa/t045",
+  "line_counts": {
+    "rollout_all_rollouts": 30864,
+    "boundary_candidates": 10036,
+    "clear_answer_anchors": 2275,
+    "clear_external_anchors": 138,
+    "teacher_labels": 12436,
+    "train_pairs": 5540,
+    "eval_pairs": 603,
+    "pair_diagnostics": 2469
+  },
+  "by_dataset_counts": {
+    "rollouts": {
+      "gsm8k": 3000,
+      "in3": 1261,
+      "math": 3000,
+      "mintqa": 7888,
+      "or_bench": 5974,
+      "commonsenseqa": 9741
+    },
+    "boundary_candidates": {
+      "or_bench": 450,
+      "gsm8k": 2000,
+      "math": 2000,
+      "in3": 986,
+      "mintqa": 3000,
+      "commonsenseqa": 1600
+    },
+    "teacher_labels": {
+      "or_bench": 1991,
+      "gsm8k": 2027,
+      "math": 2104,
+      "in3": 1235,
+      "mintqa": 3016,
+      "commonsenseqa": 2063
+    },
+    "train_pairs": {
+      "gsm8k": 860,
+      "in3": 842,
+      "math": 904,
+      "mintqa": 843,
+      "or_bench": 1051,
+      "commonsenseqa": 1040
+    },
+    "eval_pairs": {
+      "gsm8k": 84,
+      "in3": 96,
+      "math": 110,
+      "mintqa": 100,
+      "or_bench": 106,
+      "commonsenseqa": 107
+    }
+  },
+  "merge_results": {
+    "rollout_all_rollouts": {
+      "before": 21123,
+      "source": 9741,
+      "appended": 9741,
+      "skipped_existing": 0,
+      "after": 30864
+    },
+    "boundary_candidates.jsonl": {
+      "before": 8436,
+      "source": 1600,
+      "appended": 1600,
+      "skipped_existing": 0,
+      "after": 10036
+    },
+    "by_dataset/commonsenseqa/boundary_candidates.jsonl": {
+      "lines": 1600
+    },
+    "clear_answer_anchors.jsonl": {
+      "before": 1800,
+      "source": 475,
+      "appended": 475,
+      "skipped_existing": 0,
+      "after": 2275
+    },
+    "by_dataset/commonsenseqa/clear_answer_anchors.jsonl": {
+      "lines": 475
+    },
+    "clear_external_anchors.jsonl": {
+      "before": 137,
+      "source": 1,
+      "appended": 1,
+      "skipped_existing": 0,
+      "after": 138
+    },
+    "by_dataset/commonsenseqa/clear_external_anchors.jsonl": {
+      "lines": 1
+    },
+    "teacher_labels.jsonl": {
+      "before": 10373,
+      "source": 2063,
+      "appended": 2063,
+      "skipped_existing": 0,
+      "after": 12436
+    },
+    "by_dataset/commonsenseqa/teacher_labels.jsonl": {
+      "lines": 2063
+    },
+    "train_step_dpo_pairs.jsonl": {
+      "before": 4500,
+      "source": 1040,
+      "appended": 1040,
+      "skipped_existing": 0,
+      "after": 5540
+    },
+    "by_dataset/commonsenseqa/train_step_dpo_pairs.jsonl": {
+      "lines": 1040
+    },
+    "eval_step_dpo_pairs.jsonl": {
+      "before": 496,
+      "source": 107,
+      "appended": 107,
+      "skipped_existing": 0,
+      "after": 603
+    },
+    "by_dataset/commonsenseqa/eval_step_dpo_pairs.jsonl": {
+      "lines": 107
+    },
+    "pair_diagnostics.jsonl": {
+      "before": 1613,
+      "source": 856,
+      "appended": 856,
+      "skipped_existing": 0,
+      "after": 2469
+    },
+    "by_dataset/commonsenseqa/pair_diagnostics.jsonl": {
+      "lines": 856
+    },
+    "by_dataset/commonsenseqa/teacher_self_evidence_failures.jsonl": {
+      "lines": 13
+    }
+  }
+}

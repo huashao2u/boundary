@@ -91,7 +91,12 @@ def _auto_answer_score(branch: dict[str, Any], example) -> float | None:
     if gold is None:
         return None
     final_answer = branch.get("action_input", {}).get("answer") or branch.get("final_answer")
-    sample = {"gold_answer": gold, "task_type": getattr(example, "task_type", "")}
+    sample = {
+        "gold_answer": gold,
+        "task_type": getattr(example, "task_type", ""),
+        "dataset": getattr(example, "dataset", ""),
+        "metadata": getattr(example, "metadata", {}),
+    }
     try:
         correct = is_answer_correct(sample, final_answer)
         return 1.0 if correct else 0.0

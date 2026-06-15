@@ -4,6 +4,7 @@ datasets:
     - math
     - in3
     - mintqa
+    - commonsenseqa
     - or_bench
   eval: []
     # freshqa disabled for this run — per user; re-enable once tool finalize pass is validated.
@@ -14,6 +15,7 @@ datasets:
     math: train
     in3: train
     mintqa: train
+    commonsenseqa: train
     or_bench: train
     # truthfulqa: validation
     # realtimeqa: test
@@ -76,11 +78,19 @@ annotation:
 eval:
   execute_tools: true               # eval: execute tools for real
   tool_finalize_pass: true          # run student finalize pass after tool observation
-  tool_finalize_depth: 2            # post-tool finalize passes; 2 allows initial action + one additional tool action + final answer
+  tool_finalize_depth: 2            # default post-tool finalize passes (single tool action + final answer)
+  tool_finalize_depth_by_dataset:   # per-dataset override keyed to the task's tool-chain depth
+    commonsenseqa: 1                # single-step ANSWER; CLARIFY/SEARCH are terminal, no tool chain
+    or_bench: 1                     # single-step ANSWER/REFUSE; no tool chain
+    in3: 1                          # CLARIFY is terminal (waits for user reply), so one pass suffices
+    gsm8k: 3                        # allow a short CALCULATE chain (compute -> observe -> refine -> answer)
+    math: 3                         # competition math may need a couple of calculator steps
+    mintqa: 5                       # 3-4 hop entity QA needs several SEARCH->observe passes
   max_branch_steps: 2
   prompt_mode: decision_window      # default eval mirrors DPO: question + original reasoning_attempt -> decision
   candidate_temperature: 0.2
   repetition_penalty: 1.05
+  vllm_max_model_len: 12288         # multi-hop finalize (mintqa depth 5) accumulates one tool turn per hop; 8192 overflows even with compacted observations
 
 tools:
   calculator:
@@ -159,8 +169,9 @@ pair_construction:
   min_utility_gap_by_dataset:
     gsm8k: 0.20
     math: 0.20
-    in3: 0.10
+    in3: 0.05
     mintqa: 0.10
+    commonsenseqa: 0.10
     or_bench: 0.15
   min_utility_gap_by_chosen_action:
     SEARCH: 0.10
@@ -195,6 +206,16 @@ pair_construction:
       fill_remaining: false
       dataset_quota:
         in3: 1000
+    # Optional MintQA supplement for examples where the teacher evidence says
+    # a direct ANSWER is correct and better than SEARCH. Disabled by default so
+    # pair construction does not silently change the action distribution.
+    mintqa_answer_search:
+      enabled: false
+      max_pairs: 300
+      min_gap: 0.03
+      sample_weight: 0.60
+      require_answer_correct: true
+      skip_if_strong_pair_exists: true
   post_filter:
     enabled: true
     # Final pair-level quota. Small MintQA buckets are kept, while dominant
@@ -207,13 +228,23 @@ pair_construction:
       mintqa:
         SEARCH>REFUSE: 1000
         SEARCH>ANSWER: 900
+      commonsenseqa:
+        ANSWER>SEARCH: 1000
+        SEARCH>ANSWER: 150
+      in3:
+        CLARIFY>ANSWER: 700
+        ANSWER>CLARIFY: 350
+      or_bench:
+        REFUSE>ANSWER: 500
+        ANSWER>REFUSE: 700
   balance:
     dataset_quota:
       gsm8k: 0.15
       math: 0.20
       in3: 0.20
       mintqa: 0.20
-      or_bench: 0.25
+      commonsenseqa: 0.10
+      or_bench: 0.15
     chosen_action_quota:
       ANSWER: 0.25
       CALCULATE: 0.20

@@ -124,9 +124,19 @@ def main() -> None:
         help="DPO prompt/completion format. Defaults to pair_construction.prompt_mode.",
     )
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bars.")
+    parser.add_argument(
+        "--disable-augmentation",
+        action="store_true",
+        help=(
+            "Ablation: force pair_construction.augmentation.enabled=false for this run, producing "
+            "strong-only (hard-gap) pairs without near_tie/best_mid. Does not edit the yaml."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_boundary_config()
+    if args.disable_augmentation:
+        config.setdefault("pair_construction", {}).setdefault("augmentation", {})["enabled"] = False
     if args.prompt_mode is not None:
         config.setdefault("pair_construction", {})["prompt_mode"] = args.prompt_mode
 

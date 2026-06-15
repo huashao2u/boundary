@@ -24,7 +24,80 @@ logger = logging.getLogger(__name__)
 
 
 def _read_prompt(name: str) -> str:
-    return (PROMPT_ROOT / name).read_text(encoding="utf-8")
+    path = PROMPT_ROOT / name
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    teacher_path = PROMPT_ROOT / "teacher" / name
+    if teacher_path.exists():
+        return teacher_path.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"Prompt not found: {name}")
+
+
+def _allowed_actions_for_teacher(record: dict[str, Any]) -> list[str]:
+    explicit = record.get("allowed_actions")
+    if isinstance(explicit, list) and explicit:
+        actions: list[str] = []
+        for item in explicit:
+            action = str(item).upper()
+            if action in ACTION_SET and action not in actions:
+                actions.append(action)
+        if "ANSWER" not in actions:
+            actions.insert(0, "ANSWER")
+        return actions
+
+    metadata = dict(record.get("metadata") or {})
+    dataset = str(record.get("dataset") or metadata.get("dataset") or metadata.get("legacy_dataset") or "").lower()
+    actions = ["ANSWER"]
+    flags = {
+        "SEARCH": "can_search",
+        "CALCULATE": "can_calculate",
+        "CLARIFY": "can_clarify",
+        "REFUSE": "allow_refuse",
+    }
+    has_flags = any(flag in metadata for flag in flags.values())
+    for action, flag in flags.items():
+        enabled = bool(metadata.get(flag))
+        if action == "REFUSE":
+            if dataset in {"in3", "mintqa"}:
+                enabled = False
+            elif dataset == "or_bench":
+                enabled = True
+        if enabled and action not in actions:
+            actions.append(action)
+
+    if not has_flags:
+        for candidate in record.get("candidates") or []:
+            action = str(candidate.get("action", "")).upper()
+            if action in ACTION_SET and action not in actions:
+                actions.append(action)
+    return actions
+
+
+def _gold_reference_for_teacher(record: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(record.get("metadata") or {})
+    dataset = str(record.get("dataset") or metadata.get("dataset") or metadata.get("legacy_dataset") or "").lower()
+    gold_reference: dict[str, Any] = {
+        "gold_answer": record.get("gold_answer"),
+        "metadata_refusal_label": {
+            "should_refuse": metadata.get("should_refuse"),
+            "or_bench_label": metadata.get("or_bench_label"),
+        },
+    }
+    if dataset == "or_bench":
+        should_refuse = metadata.get("should_refuse")
+        gold_reference["gold_next_action"] = (
+            "REFUSE" if should_refuse is True else "ANSWER" if should_refuse is False else None
+        )
+    elif dataset == "in3":
+        vague = metadata.get("vague")
+        gold_reference["in3_label"] = {
+            "vague": vague,
+            "gold_next_action": "CLARIFY" if vague is True else "ANSWER" if vague is False else None,
+            "missing_details": metadata.get("missing_details"),
+            "gold_clarify_question": metadata.get("gold_clarify_question"),
+            "gold_clarify_reply": metadata.get("gold_clarify_reply"),
+        }
+    return gold_reference
 
 
 # ---------------------------------------------------------------------------
@@ -514,21 +587,13 @@ def _label_one_record(
         ensure_ascii=False,
     )
 
+    gold_reference = _gold_reference_for_teacher(record)
     user_prompt = user_prompt_template.format(
         question=record["question"],
-        gold_reference=json.dumps(
-            {
-                "gold_answer": record.get("gold_answer"),
-                "metadata_refusal_label": {
-                    "should_refuse": (record.get("metadata") or {}).get("should_refuse"),
-                    "or_bench_label": (record.get("metadata") or {}).get("or_bench_label"),
-                },
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
+        gold_reference=json.dumps(gold_reference, ensure_ascii=False, indent=2),
         reason_attempt=record.get("reasoning_attempt", record.get("reason_prefix", "")),
         uncertainty_summary=record.get("uncertainty_summary", ""),
+        allowed_actions=json.dumps(_allowed_actions_for_teacher(record), ensure_ascii=False),
         student_candidates=json.dumps(student_candidates_for_prompt, ensure_ascii=False, indent=2),
         process_features=json.dumps(record.get("process_features", {}), ensure_ascii=False),
         semantic_tag_evidence=json.dumps(record.get("semantic_tag_evidence", {}), ensure_ascii=False, indent=2),
@@ -590,7 +655,9 @@ def _label_one_record(
                         "Question:\n"
                         f"{record['question']}\n"
                         "Gold/reference for offline judging only:\n"
-                        f"{record.get('gold_answer')}\n"
+                        f"{json.dumps(gold_reference, ensure_ascii=False, indent=2)}\n"
+                        "Allowed actions for this example:\n"
+                        f"{json.dumps(_allowed_actions_for_teacher(record), ensure_ascii=False)}\n"
                         "Previous invalid response:\n"
                         f"{json.dumps(raw, ensure_ascii=False)}\n"
                         "Return the full JSON object with semantic_tags, meta_reflection, "
@@ -637,11 +704,7 @@ def _label_one_record(
             "question": record["question"],
             "gold_answer": record.get("gold_answer"),
             "metadata": record.get("metadata") or {},
-            "gold_reference": {
-                "gold_answer": record.get("gold_answer"),
-                "should_refuse": (record.get("metadata") or {}).get("should_refuse"),
-                "or_bench_label": (record.get("metadata") or {}).get("or_bench_label"),
-            },
+            "gold_reference": gold_reference,
             "source": source,
             "teacher_provider": client.provider,
             "teacher_model": client.model,
@@ -670,8 +733,8 @@ def label_boundary_records(
 ) -> list[dict[str, Any]]:
     from mcagent_boundary.progress import make_progress
 
-    system_prompt = _read_prompt("teacher_tag_reflect.md")
-    user_prompt_template = _read_prompt("teacher_action_recommend.md")
+    system_prompt = _read_prompt("tag_reflect.md")
+    user_prompt_template = _read_prompt("action_recommend.md")
     client = OpenAICompatibleChatClient(config)
     counters = {"success": 0, "fallback": 0, "failure": 0, "skipped": 0}
     teacher_cfg = config.get("teacher", {})

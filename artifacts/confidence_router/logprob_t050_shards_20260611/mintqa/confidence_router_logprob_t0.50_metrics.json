@@ -1,0 +1,159 @@
+{
+  "num_samples": 100,
+  "metric_definitions": {
+    "num_samples": "Number of evaluated DPO examples for the dataset.",
+    "action_counts": "Counts of the raw model's parsed single-action decisions. Missing or unparsable actions are counted as NONE.",
+    "action_rates": "action_counts[action] / num_samples for each canonical action.",
+    "non_answer_action_rate": "(num_samples - action_counts['ANSWER']) / num_samples.",
+    "executed_tool_call_count": "Number of SEARCH, CALCULATE, or CLARIFY decisions for which the eval environment executes a tool branch.",
+    "executed_tool_call_rate": "executed_tool_call_count / num_samples.",
+    "tool_error_count": "Executed tool branches whose observation status is tool_error or branch info has tool_error=true.",
+    "tool_error_rate": "tool_error_count / executed_tool_call_count; null when no tool branch is executed.",
+    "finalize_parse_failure_count": "Executed tool branches whose post-tool finalization failed schema parsing.",
+    "finalize_parse_failure_rate": "finalize_parse_failure_count / executed_tool_call_count; null when no tool branch is executed.",
+    "tool_finalize_depth": "Configured maximum number of post-tool finalize passes. Depth 1 preserves one observation followed by one final decision; larger values can execute additional tool actions proposed by finalize.",
+    "calculator_backend": "Configured calculator backend used during eval, such as safe_eval or python_sandbox.",
+    "strict_json_parse_rate": "Raw free-generation output that is a full JSON object without repair or substring extraction / num_samples.",
+    "strict_action_parse_rate": "Raw free-generation output that strictly parses to a JSON action object with an allowed action / num_samples.",
+    "schema_action_parse_rate": "Records with at least one schema-valid canonical candidate after the normal parser / num_samples.",
+    "selected_pair_u_rel_mean": "Mean teacher u_rel of the free-generation selected action when it matches the DPO pair's chosen or rejected action.",
+    "selected_real_utility_mean": "Mean outcome-based utility_real of the free-generation selected action when available after real tool execution.",
+    "selected_matches_chosen_action_rate": "Free-generation selected action equals the pair's chosen action / num_samples.",
+    "selected_matches_rejected_action_rate": "Free-generation selected action equals the pair's rejected action / num_samples.",
+    "selected_matches_best_real_action_rate": "Free-generation selected action equals the real-execution best action / examples with best_action_real.",
+    "pair_logp.chosen_gt_rejected_rate": "Teacher-forced pair scoring rate where model logp(chosen completion) > model logp(rejected completion).",
+    "pair_logp.logp_margin_mean": "Mean model_chosen_logp - model_rejected_logp over DPO eval pairs.",
+    "pair_logp.reward_margin_mean": "Mean beta*((model_chosen-ref_chosen)-(model_rejected-ref_rejected)); requires --reference-logp-file.",
+    "final_correct_rate": "Backward-compatible alias for final_correct_valid_rate.",
+    "final_correct_valid_rate": "final_correct_valid_count / final_correct_valid_denom. Denominator includes only records with an available correctness signal.",
+    "final_correct_all_rate": "final_correct_all_count / final_correct_all_denom. Denominator is all evaluated samples, so parse failures and null natural actions count as failures.",
+    "mintqa_correctness_source.teacher_judged": "MintQA records whose final_correct came from the teacher judge.",
+    "mintqa_correctness_source.machine_fallback": "MintQA records whose final_correct fell back to machine gold-matching because the teacher judge was skipped or errored.",
+    "mintqa_correctness_source.divergence": "MintQA teacher-judged records where the machine gold-match signal disagreed with the teacher verdict.",
+    "mintqa_correctness_source.divergence_rate": "divergence / teacher_judged; a teacher-vs-machine disagreement diagnostic, not an error rate.",
+    "in3_clarify_metrics.needs_clarification_count": "IN3 examples with gold clarification information, from gold_clarify_question or missing_details metadata.",
+    "in3_clarify_metrics.clarify_when_needed_rate": "CLARIFY decisions on examples that need clarification / needs_clarification_count.",
+    "in3_clarify_metrics.missed_clarification_rate": "Non-CLARIFY decisions on examples that need clarification / needs_clarification_count.",
+    "in3_clarify_metrics.over_clarification_rate": "CLARIFY decisions on examples that do not need clarification / no_clarification_needed_count.",
+    "in3_clarify_metrics.teacher_clarify_correct_rate": "Teacher-accepted model clarification questions / teacher judged CLARIFY decisions on examples that need clarification.",
+    "in3_clarify_metrics.overall_clarify_success_rate": "Teacher-accepted CLARIFY decisions / needs_clarification_count.",
+    "or_bench_refusal_metrics.should_refuse_but_answer_schema_rate": "ANSWER schema decisions on should-refuse OR-BENCH examples / should_refuse_count.",
+    "or_bench_refusal_metrics.should_answer_but_refuse_schema_rate": "REFUSE schema decisions on should-answer OR-BENCH examples / should_answer_count.",
+    "or_bench_refusal_metrics.answer_shell_refusal_rate": "ANSWER schema decisions whose text is semantically a refusal / num_samples.",
+    "or_bench_refusal_metrics.incorrect_refusal_rate": "Should-answer examples judged as REFUSE/refusal/evasive non-answer / should_answer_count.",
+    "or_bench_refusal_metrics.unsafe_compliance_rate": "Should-refuse examples judged as harmful compliance / should_refuse_count.",
+    "or_bench_refusal_metrics.behavior_correct_rate": "Teacher-judged behavior_correct decisions / teacher judged OR-BENCH examples."
+  },
+  "by_dataset": {
+    "mintqa": {
+      "num_samples": 100,
+      "action_counts": {
+        "SEARCH": 100
+      },
+      "action_rates": {
+        "ANSWER": 0.0,
+        "SEARCH": 1.0,
+        "CALCULATE": 0.0,
+        "CLARIFY": 0.0,
+        "REFUSE": 0.0
+      },
+      "non_answer_action_rate": 1.0,
+      "executed_tool_call_count": 100,
+      "executed_tool_call_rate": 1.0,
+      "tool_error_count": 0,
+      "tool_error_rate": 0.0,
+      "finalize_parse_failure_count": 0,
+      "finalize_parse_failure_rate": 0.0,
+      "final_correct_count": 0,
+      "final_correct_denom": 100,
+      "final_correct_rate": 0.0,
+      "final_correct_valid_count": 0,
+      "final_correct_valid_denom": 100,
+      "final_correct_valid_rate": 0.0,
+      "final_correct_all_count": 0,
+      "final_correct_all_denom": 100,
+      "final_correct_all_rate": 0.0,
+      "mintqa_correctness_source": {
+        "teacher_judged": 0,
+        "machine_fallback": 100,
+        "divergence": 0,
+        "divergence_rate": null
+      }
+    }
+  },
+  "action_metrics_existing": {
+    "action_accuracy": 1.0,
+    "unnecessary_search_rate": 1.0,
+    "search_efficiency": {
+      "by_group": {
+        "tool_needed": {
+          "search_total": 100,
+          "unnecessary_searches": 100,
+          "unnecessary_search_rate": 1.0
+        }
+      },
+      "by_dataset": {
+        "mintqa": {
+          "search_total": 100,
+          "unnecessary_searches": 100,
+          "unnecessary_search_rate": 1.0
+        }
+      }
+    },
+    "calculate_helpfulness": null,
+    "clarify_helpfulness": null,
+    "justified_refusal_rate": null,
+    "over_refusal_rate": null,
+    "or_bench_over_refusal_rate": null,
+    "or_bench_under_refusal_rate": null,
+    "or_bench_refusal_action_accuracy": null,
+    "over_answer_rate": null,
+    "non_answer_rate": 1.0,
+    "expected_utility": -0.19999999999999962,
+    "action_counts": {
+      "SEARCH": 100
+    }
+  },
+  "task_metrics_existing": {
+    "overall_exact_match": 0.0,
+    "expected_utility": -0.19999999999999962,
+    "clarify_resolution_rate": null,
+    "num_samples": 100,
+    "per_dataset": {
+      "mintqa": {
+        "exact_match": 0.0,
+        "expected_utility": -0.19999999999999962,
+        "over_refusal_rate": null,
+        "under_refusal_rate": null,
+        "refusal_action_accuracy": null,
+        "schema_action_accuracy": null,
+        "behavioral_refusal_accuracy": null,
+        "unsafe_compliance_rate": null,
+        "answer_shell_refusal_rate": null,
+        "num_samples": 100
+      }
+    }
+  },
+  "pair_file": "artifacts/confidence_router/logprob_t050_shards_20260611/pairs/mintqa.jsonl",
+  "num_examples": 100,
+  "num_evaluated": 100,
+  "rollout_output": "artifacts/confidence_router/logprob_t050_shards_20260611/mintqa/confidence_router_logprob_t0.50_rollouts.jsonl",
+  "rollouts_by_dataset": {
+    "mintqa": "artifacts/confidence_router/logprob_t050_shards_20260611/mintqa/by_dataset/mintqa/confidence_router_logprob_t0.50_rollouts.jsonl"
+  },
+  "router_source": "logprob",
+  "router_threshold": 0.5,
+  "backend": "vllm",
+  "teacher_judges_enabled": false,
+  "tool_finalize_depth": 2,
+  "tool_finalize_depth_by_dataset": {
+    "commonsenseqa": 1,
+    "or_bench": 1,
+    "in3": 1,
+    "gsm8k": 3,
+    "math": 3,
+    "mintqa": 5
+  },
+  "search_backend": "serper",
+  "serper_api_key_available": true
+}

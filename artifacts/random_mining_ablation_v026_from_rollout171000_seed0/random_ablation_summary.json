@@ -1,0 +1,172 @@
+{
+  "mode": "random_mining_ablation",
+  "rollout_file": "/media/songyl/boundary/artifacts/rollout_v026_20260526T171000Z/all_rollouts.jsonl",
+  "output_dir": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0",
+  "reference_train_pairs": "/media/songyl/boundary/artifacts/pairs_v026_20260527T_boundary_from_rollout171000/train_step_dpo_pairs.jsonl",
+  "fixed_reference_eval_pairs": "/media/songyl/boundary/artifacts/pairs_v026_20260527T_boundary_from_rollout171000/eval_step_dpo_pairs.jsonl",
+  "reference_train_count": 5540,
+  "fixed_reference_eval_count": 603,
+  "reference_train_dataset_distribution": {
+    "gsm8k": 860,
+    "in3": 842,
+    "math": 904,
+    "mintqa": 843,
+    "or_bench": 1051,
+    "commonsenseqa": 1040
+  },
+  "seed": 0,
+  "random_total_records_requested": 12188,
+  "random_min_valid_candidates": 2,
+  "random_require_action_diversity": true,
+  "num_rollouts": 30864,
+  "num_eligible_random_records": 30228,
+  "skipped_random_records": {
+    "ineligible_candidates_or_diagnostics": 636
+  },
+  "sampling_report": {
+    "target_total": 12188,
+    "selected_total": 12188,
+    "target_by_dataset": {
+      "commonsenseqa": 2288,
+      "gsm8k": 1892,
+      "in3": 1852,
+      "math": 1989,
+      "mintqa": 1855,
+      "or_bench": 2312
+    },
+    "selected_by_dataset": {
+      "or_bench": 2440,
+      "math": 2025,
+      "commonsenseqa": 2484,
+      "gsm8k": 1931,
+      "mintqa": 2058,
+      "in3": 1250
+    },
+    "available_by_dataset": {
+      "gsm8k": 2996,
+      "in3": 1250,
+      "math": 2890,
+      "mintqa": 7885,
+      "or_bench": 5947,
+      "commonsenseqa": 9260
+    },
+    "shortages": {
+      "in3": {
+        "target": 1852,
+        "available": 1250,
+        "selected": 1250
+      }
+    }
+  },
+  "design_note": "Final comparability is enforced after teacher-label/u_rel pair construction, not at the mining layer. Random mining over-samples states; final random train pairs are downsampled to the reference train quotas. Eval pairs are not resampled: the output eval file is copied from the fixed reference eval set.",
+  "mining_output": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/mined_random.json",
+  "boundary_output": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/boundary_candidates.jsonl",
+  "clear_answer_output": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/clear_answer_anchors.jsonl",
+  "clear_external_output": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/clear_external_anchors.jsonl",
+  "boundary_by_dataset": {
+    "or_bench": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/or_bench/boundary_candidates.jsonl",
+    "math": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/math/boundary_candidates.jsonl",
+    "commonsenseqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/commonsenseqa/boundary_candidates.jsonl",
+    "gsm8k": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/gsm8k/boundary_candidates.jsonl",
+    "mintqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/mintqa/boundary_candidates.jsonl",
+    "in3": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/in3/boundary_candidates.jsonl"
+  },
+  "pair_construction": {
+    "status": "ok",
+    "teacher_label_file": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/teacher_labels.jsonl",
+    "teacher_labels_loaded": 12188,
+    "teacher_labels_used": 12188,
+    "required_teacher_sources": [],
+    "raw_train_pairs": 5288,
+    "raw_heldout_pairs_folded_into_train_candidates": 596,
+    "raw_train_candidate_pairs": 5884,
+    "final_train_pairs": 5540,
+    "fixed_eval_pairs": 603,
+    "eval_mode": "fixed_reference_eval_copied",
+    "diagnostics_count": 1939,
+    "train_match_report": {
+      "target_total": 5540,
+      "available_total": 5884,
+      "selected_total": 5540,
+      "match_fields": [
+        "dataset",
+        "action_pair"
+      ],
+      "target_counts": {
+        "commonsenseqa|ANSWER>SEARCH": 910,
+        "commonsenseqa|SEARCH>ANSWER": 130,
+        "gsm8k|ANSWER>CALCULATE": 354,
+        "gsm8k|CALCULATE>ANSWER": 506,
+        "in3|ANSWER>CLARIFY": 214,
+        "in3|CLARIFY>ANSWER": 628,
+        "math|ANSWER>CALCULATE": 442,
+        "math|CALCULATE>ANSWER": 462,
+        "mintqa|ANSWER>SEARCH": 40,
+        "mintqa|SEARCH>ANSWER": 803,
+        "or_bench|ANSWER>REFUSE": 635,
+        "or_bench|REFUSE>ANSWER": 416
+      },
+      "selected_counts": {
+        "commonsenseqa|ANSWER>SEARCH": 940,
+        "commonsenseqa|SEARCH>ANSWER": 92,
+        "gsm8k|ANSWER>CALCULATE": 378,
+        "gsm8k|CALCULATE>ANSWER": 520,
+        "in3|ANSWER>CLARIFY": 225,
+        "in3|CLARIFY>ANSWER": 658,
+        "math|ANSWER>CALCULATE": 450,
+        "math|CALCULATE>ANSWER": 474,
+        "mintqa|ANSWER>SEARCH": 25,
+        "mintqa|SEARCH>ANSWER": 832,
+        "or_bench|ANSWER>REFUSE": 664,
+        "or_bench|REFUSE>ANSWER": 282
+      },
+      "shortages": {
+        "commonsenseqa|SEARCH>ANSWER": {
+          "target": 130,
+          "available": 92,
+          "selected": 92
+        },
+        "mintqa|ANSWER>SEARCH": {
+          "target": 40,
+          "available": 25,
+          "selected": 25
+        },
+        "or_bench|REFUSE>ANSWER": {
+          "target": 416,
+          "available": 282,
+          "selected": 282
+        }
+      },
+      "filled_shortages_globally": true,
+      "exact_total_match": true,
+      "exact_quota_match": false
+    },
+    "train_output": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/train_step_dpo_pairs.jsonl",
+    "eval_output": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/eval_step_dpo_pairs.jsonl",
+    "diagnostics_output": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/pair_diagnostics.jsonl",
+    "train_by_dataset": {
+      "mintqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/mintqa/train_step_dpo_pairs.jsonl",
+      "in3": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/in3/train_step_dpo_pairs.jsonl",
+      "math": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/math/train_step_dpo_pairs.jsonl",
+      "commonsenseqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/commonsenseqa/train_step_dpo_pairs.jsonl",
+      "gsm8k": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/gsm8k/train_step_dpo_pairs.jsonl",
+      "or_bench": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/or_bench/train_step_dpo_pairs.jsonl"
+    },
+    "eval_by_dataset": {
+      "gsm8k": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/gsm8k/eval_step_dpo_pairs.jsonl",
+      "in3": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/in3/eval_step_dpo_pairs.jsonl",
+      "math": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/math/eval_step_dpo_pairs.jsonl",
+      "mintqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/mintqa/eval_step_dpo_pairs.jsonl",
+      "or_bench": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/or_bench/eval_step_dpo_pairs.jsonl",
+      "commonsenseqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/commonsenseqa/eval_step_dpo_pairs.jsonl"
+    },
+    "diagnostics_by_dataset": {
+      "math": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/math/pair_diagnostics.jsonl",
+      "commonsenseqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/commonsenseqa/pair_diagnostics.jsonl",
+      "gsm8k": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/gsm8k/pair_diagnostics.jsonl",
+      "in3": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/in3/pair_diagnostics.jsonl",
+      "mintqa": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/mintqa/pair_diagnostics.jsonl",
+      "or_bench": "/media/songyl/boundary/artifacts/random_mining_ablation_v026_from_rollout171000_seed0/by_dataset/or_bench/pair_diagnostics.jsonl"
+    }
+  }
+}

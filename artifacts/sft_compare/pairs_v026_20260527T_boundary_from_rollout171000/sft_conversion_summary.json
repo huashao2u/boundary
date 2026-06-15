@@ -1,0 +1,74 @@
+{
+  "source_train_pair_file": "/media/songyl/boundary/artifacts/pairs_v026_20260527T_boundary_from_rollout171000/train_step_dpo_pairs.jsonl",
+  "source_eval_pair_file": "/media/songyl/boundary/artifacts/pairs_v026_20260527T_boundary_from_rollout171000/eval_step_dpo_pairs.jsonl",
+  "train_output": "/media/songyl/boundary/artifacts/sft_compare/pairs_v026_20260527T_boundary_from_rollout171000/train_sft_chosen.jsonl",
+  "eval_output": "/media/songyl/boundary/artifacts/sft_compare/pairs_v026_20260527T_boundary_from_rollout171000/eval_sft_chosen.jsonl",
+  "min_sample_weight": 0.0,
+  "pair_kind": "all",
+  "train": {
+    "num_records": 5540,
+    "by_dataset": {
+      "or_bench": 1051,
+      "commonsenseqa": 1040,
+      "math": 904,
+      "gsm8k": 860,
+      "mintqa": 843,
+      "in3": 842
+    },
+    "by_pair_kind": {
+      "strong": 5003,
+      "near_tie": 537
+    },
+    "by_chosen_action": {
+      "ANSWER": 2595,
+      "CALCULATE": 968,
+      "SEARCH": 933,
+      "CLARIFY": 628,
+      "REFUSE": 416
+    },
+    "by_action_pair": {
+      "CALCULATE>ANSWER": 968,
+      "ANSWER>SEARCH": 950,
+      "SEARCH>ANSWER": 933,
+      "ANSWER>CALCULATE": 796,
+      "ANSWER>REFUSE": 635,
+      "CLARIFY>ANSWER": 628,
+      "REFUSE>ANSWER": 416,
+      "ANSWER>CLARIFY": 214
+    },
+    "sample_weight_sum": 5217.8
+  },
+  "eval": {
+    "num_records": 603,
+    "by_dataset": {
+      "math": 110,
+      "commonsenseqa": 107,
+      "or_bench": 106,
+      "mintqa": 100,
+      "in3": 96,
+      "gsm8k": 84
+    },
+    "by_pair_kind": {
+      "strong": 538,
+      "near_tie": 65
+    },
+    "by_chosen_action": {
+      "ANSWER": 279,
+      "SEARCH": 114,
+      "CALCULATE": 97,
+      "CLARIFY": 72,
+      "REFUSE": 41
+    },
+    "by_action_pair": {
+      "SEARCH>ANSWER": 114,
+      "CALCULATE>ANSWER": 97,
+      "ANSWER>CALCULATE": 97,
+      "ANSWER>SEARCH": 93,
+      "CLARIFY>ANSWER": 72,
+      "ANSWER>REFUSE": 65,
+      "REFUSE>ANSWER": 41,
+      "ANSWER>CLARIFY": 24
+    },
+    "sample_weight_sum": 564.0
+  }
+}

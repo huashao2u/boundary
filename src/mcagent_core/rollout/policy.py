@@ -366,6 +366,7 @@ class HeuristicPolicy:
         decision: dict[str, Any],
         observation: dict[str, Any],
         prompt_text: str | None = None,
+        prompt_messages: list[dict[str, str]] | None = None,
     ) -> dict[str, str]:
         action = decision["action"]
         if action == "SEARCH":
@@ -430,6 +431,7 @@ class HFLocalPolicy:
                  candidate_temperature: float = 0.7, candidate_top_p: float = 0.95,
                  candidate_top_k: int | None = None,
                  top_k_actions: int = 3,
+                 repetition_penalty: float = 1.0,
                  adapter_path: str | None = None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -446,6 +448,7 @@ class HFLocalPolicy:
         self.candidate_top_p = candidate_top_p
         self.candidate_top_k = candidate_top_k
         self.top_k_actions = top_k_actions
+        self.repetition_penalty = repetition_penalty
         self.adapter_path = adapter_path
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -493,6 +496,8 @@ class HFLocalPolicy:
             gen_kwargs["top_p"] = self.candidate_top_p
             if self.candidate_top_k is not None:
                 gen_kwargs["top_k"] = self.candidate_top_k
+        if self.repetition_penalty != 1.0:
+            gen_kwargs["repetition_penalty"] = self.repetition_penalty
         output = self.model.generate(**inputs, **gen_kwargs)
         # Slice off the prompt tokens so ``decoded`` contains only the student's
         # new continuation — otherwise parse sees the whole prompt.
@@ -554,13 +559,21 @@ class HFLocalPolicy:
         decision: dict[str, Any],
         observation: dict[str, Any],
         prompt_text: str | None = None,
+        prompt_messages: list[dict[str, str]] | None = None,
     ) -> dict[str, str]:
-        formatted_prompt = self._format_prompt_for_generation(prompt_text or _build_finalize_prompt(sample, decision, observation))
+        if prompt_messages and getattr(self.tokenizer, "chat_template", None) is not None:
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                prompt_messages, tokenize=False, add_generation_prompt=True
+            )
+        else:
+            formatted_prompt = self._format_prompt_for_generation(prompt_text or _build_finalize_prompt(sample, decision, observation))
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to(self.model.device)
         gen_kwargs: dict[str, Any] = {
             "max_new_tokens": min(self.max_new_tokens, 256),
             "do_sample": False,
         }
+        if self.repetition_penalty != 1.0:
+            gen_kwargs["repetition_penalty"] = self.repetition_penalty
         output = self.model.generate(**inputs, **gen_kwargs)
         generated_tokens = output[0][inputs.input_ids.shape[1]:]
         decoded = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
@@ -732,8 +745,14 @@ class VLLMLocalPolicy:
         decision: dict[str, Any],
         observation: dict[str, Any],
         prompt_text: str | None = None,
+        prompt_messages: list[dict[str, str]] | None = None,
     ) -> dict[str, str]:
-        formatted_prompt = self._format_prompt_for_generation(prompt_text or _build_finalize_prompt(sample, decision, observation))
+        if prompt_messages and getattr(self.tokenizer, "chat_template", None) is not None:
+            formatted_prompt = self.tokenizer.apply_chat_template(
+                prompt_messages, tokenize=False, add_generation_prompt=True
+            )
+        else:
+            formatted_prompt = self._format_prompt_for_generation(prompt_text or _build_finalize_prompt(sample, decision, observation))
         sampling_params = self.SamplingParams(
             max_tokens=min(self.max_new_tokens, 256),
             temperature=0.0,
@@ -887,6 +906,7 @@ def build_policy(
                              candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p,
                              candidate_top_k=candidate_top_k,
                              top_k_actions=top_k_actions,
+                             repetition_penalty=repetition_penalty,
                              adapter_path=adapter_path)
     if backend == "vllm":
         if adapter_path:
@@ -911,6 +931,7 @@ def build_policy(
                                  candidate_temperature=candidate_temperature, candidate_top_p=candidate_top_p,
                                  candidate_top_k=candidate_top_k,
                                  top_k_actions=top_k_actions,
+                                 repetition_penalty=repetition_penalty,
                                  adapter_path=adapter_path)
         # DEPRECATED(mainline): auto demotion to heuristic is smoke-only.
         logger.warning(

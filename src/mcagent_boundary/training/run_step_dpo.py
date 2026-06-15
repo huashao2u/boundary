@@ -120,6 +120,17 @@ def _make_weighted_dpo_trainer(base_cls):
             rejected_logratios = rejected_logps - ref_rejected_logps
             delta_score = chosen_logratios - rejected_logratios
             per_sequence_loss = -F.logsigmoid(self.beta * delta_score)
+
+            rpo_alpha = float(getattr(self, "rpo_alpha", 0.0) or 0.0)
+            chosen_completion_mask = shift_completion_mask[: shift_completion_mask.shape[0] // 2]
+            chosen_token_counts = chosen_completion_mask.sum(dim=1).clamp_min(1).to(chosen_logps.dtype)
+            chosen_nll_per_seq = -chosen_logps / chosen_token_counts
+            if rpo_alpha > 0:
+                per_sequence_loss = per_sequence_loss + rpo_alpha * chosen_nll_per_seq
+            self._metrics[mode]["nll/chosen"].append(
+                self.accelerator.gather(chosen_nll_per_seq.detach()).mean().item()
+            )
+
             loss_weight = float(getattr(self, "loss_weights", [1.0])[0])
             loss = _weighted_sequence_loss_mean(per_sequence_loss, sample_weight) * loss_weight
 
@@ -212,6 +223,23 @@ def _make_weighted_preference_collator(dpo_args, tokenizer):
     )
 
 
+def _make_min_save_step_callback(min_save_steps: int):
+    from transformers import TrainerCallback
+
+    class MinSaveStepCallback(TrainerCallback):
+        def on_step_end(self, args, state, control, **kwargs):
+            if state.global_step < min_save_steps:
+                control.should_save = False
+            return control
+
+        def on_save(self, args, state, control, **kwargs):
+            if state.global_step < min_save_steps:
+                control.should_save = False
+            return control
+
+    return MinSaveStepCallback()
+
+
 def run_step_dpo(
     train_pairs: list[dict],
     eval_pairs: list[dict],
@@ -252,6 +280,7 @@ def run_step_dpo(
             int(training_cfg["save_total_limit"]) if training_cfg.get("save_total_limit") is not None else None
         ),
         max_length=int(training_cfg["max_length"]),
+        seed=int(training_cfg.get("seed", 42)),
         truncation_mode=str(training_cfg.get("truncation_mode", "keep_end")),
         remove_unused_columns=False,
         report_to=list(training_cfg.get("report_to", [])),
@@ -260,6 +289,12 @@ def run_step_dpo(
         bf16=bool(training_cfg.get("bf16", False)),
         fp16=bool(training_cfg.get("fp16", False)),
         gradient_checkpointing=bool(training_cfg.get("gradient_checkpointing", True)),
+        precompute_ref_log_probs=bool(training_cfg.get("precompute_ref_log_probs", False)),
+        precompute_ref_batch_size=(
+            int(training_cfg["precompute_ref_batch_size"])
+            if training_cfg.get("precompute_ref_batch_size") is not None
+            else None
+        ),
         ddp_find_unused_parameters=(
             bool(training_cfg["ddp_find_unused_parameters"])
             if training_cfg.get("ddp_find_unused_parameters") is not None
@@ -268,15 +303,24 @@ def run_step_dpo(
     )
     trainer_cls = _make_weighted_dpo_trainer(DPOTrainer) if use_sample_weights else DPOTrainer
     data_collator = _make_weighted_preference_collator(dpo_args, tokenizer) if use_sample_weights else None
+    callbacks = []
+    min_save_steps = int(training_cfg.get("min_save_steps", 0) or 0)
+    if min_save_steps > 0 and not smoke:
+        callbacks.append(_make_min_save_step_callback(min_save_steps))
     trainer = trainer_cls(
         model=model,
         ref_model=None,
         args=dpo_args,
+        callbacks=callbacks,
         data_collator=data_collator,
         train_dataset=Dataset.from_list(train_data),
         eval_dataset=Dataset.from_list(eval_data) if eval_data else None,
         processing_class=tokenizer,
     )
+    rpo_alpha = float(training_cfg.get("rpo_alpha", 0.0) or 0.0)
+    if rpo_alpha < 0:
+        raise ValueError(f"rpo_alpha must be >= 0, got {rpo_alpha}")
+    trainer.rpo_alpha = rpo_alpha
     train_result = trainer.train()
     eval_metrics = trainer.evaluate() if eval_data else {}
     trainer.save_model(str(output_dir))
@@ -285,6 +329,7 @@ def run_step_dpo(
         "num_eval_pairs": len(eval_pairs),
         "dpo_format": "message",
         "use_sample_weights": use_sample_weights,
+        "rpo_alpha": rpo_alpha,
         "smoke": smoke,
         "train_metrics": {
             key: value

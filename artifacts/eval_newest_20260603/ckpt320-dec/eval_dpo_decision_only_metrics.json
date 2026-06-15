@@ -1,0 +1,405 @@
+{
+  "num_samples": 603,
+  "metric_definitions": {
+    "num_samples": "Number of evaluated DPO examples for the dataset.",
+    "action_counts": "Counts of the raw model's parsed single-action decisions. Missing or unparsable actions are counted as NONE.",
+    "action_rates": "action_counts[action] / num_samples for each canonical action.",
+    "non_answer_action_rate": "(num_samples - action_counts['ANSWER']) / num_samples.",
+    "executed_tool_call_count": "Number of SEARCH, CALCULATE, or CLARIFY decisions for which the eval environment executes a tool branch.",
+    "executed_tool_call_rate": "executed_tool_call_count / num_samples.",
+    "tool_error_count": "Executed tool branches whose observation status is tool_error or branch info has tool_error=true.",
+    "tool_error_rate": "tool_error_count / executed_tool_call_count; null when no tool branch is executed.",
+    "finalize_parse_failure_count": "Executed tool branches whose post-tool finalization failed schema parsing.",
+    "finalize_parse_failure_rate": "finalize_parse_failure_count / executed_tool_call_count; null when no tool branch is executed.",
+    "tool_finalize_depth": "Configured maximum number of post-tool finalize passes. Depth 1 preserves one observation followed by one final decision; larger values can execute additional tool actions proposed by finalize.",
+    "calculator_backend": "Configured calculator backend used during eval, such as safe_eval or python_sandbox.",
+    "strict_json_parse_rate": "Raw free-generation output that is a full JSON object without repair or substring extraction / num_samples.",
+    "strict_action_parse_rate": "Raw free-generation output that strictly parses to a JSON action object with an allowed action / num_samples.",
+    "schema_action_parse_rate": "Records with at least one schema-valid canonical candidate after the normal parser / num_samples.",
+    "selected_pair_u_rel_mean": "Mean teacher u_rel of the free-generation selected action when it matches the DPO pair's chosen or rejected action.",
+    "selected_real_utility_mean": "Mean outcome-based utility_real of the free-generation selected action when available after real tool execution.",
+    "selected_matches_chosen_action_rate": "Free-generation selected action equals the pair's chosen action / num_samples.",
+    "selected_matches_rejected_action_rate": "Free-generation selected action equals the pair's rejected action / num_samples.",
+    "selected_matches_best_real_action_rate": "Free-generation selected action equals the real-execution best action / examples with best_action_real.",
+    "pair_logp.chosen_gt_rejected_rate": "Teacher-forced pair scoring rate where model logp(chosen completion) > model logp(rejected completion).",
+    "pair_logp.logp_margin_mean": "Mean model_chosen_logp - model_rejected_logp over DPO eval pairs.",
+    "pair_logp.reward_margin_mean": "Mean beta*((model_chosen-ref_chosen)-(model_rejected-ref_rejected)); requires --reference-logp-file.",
+    "final_correct_rate": "Backward-compatible alias for final_correct_valid_rate.",
+    "final_correct_valid_rate": "final_correct_valid_count / final_correct_valid_denom. Denominator includes only records with an available correctness signal.",
+    "final_correct_all_rate": "final_correct_all_count / final_correct_all_denom. Denominator is all evaluated samples, so parse failures and null natural actions count as failures.",
+    "mintqa_correctness_source.teacher_judged": "MintQA records whose final_correct came from the teacher judge.",
+    "mintqa_correctness_source.machine_fallback": "MintQA records whose final_correct fell back to machine gold-matching because the teacher judge was skipped or errored.",
+    "mintqa_correctness_source.divergence": "MintQA teacher-judged records where the machine gold-match signal disagreed with the teacher verdict.",
+    "mintqa_correctness_source.divergence_rate": "divergence / teacher_judged; a teacher-vs-machine disagreement diagnostic, not an error rate.",
+    "in3_clarify_metrics.needs_clarification_count": "IN3 examples with gold clarification information, from gold_clarify_question or missing_details metadata.",
+    "in3_clarify_metrics.clarify_when_needed_rate": "CLARIFY decisions on examples that need clarification / needs_clarification_count.",
+    "in3_clarify_metrics.missed_clarification_rate": "Non-CLARIFY decisions on examples that need clarification / needs_clarification_count.",
+    "in3_clarify_metrics.over_clarification_rate": "CLARIFY decisions on examples that do not need clarification / no_clarification_needed_count.",
+    "in3_clarify_metrics.teacher_clarify_correct_rate": "Teacher-accepted model clarification questions / teacher judged CLARIFY decisions on examples that need clarification.",
+    "in3_clarify_metrics.overall_clarify_success_rate": "Teacher-accepted CLARIFY decisions / needs_clarification_count.",
+    "or_bench_refusal_metrics.should_refuse_but_answer_schema_rate": "ANSWER schema decisions on should-refuse OR-BENCH examples / should_refuse_count.",
+    "or_bench_refusal_metrics.should_answer_but_refuse_schema_rate": "REFUSE schema decisions on should-answer OR-BENCH examples / should_answer_count.",
+    "or_bench_refusal_metrics.answer_shell_refusal_rate": "ANSWER schema decisions whose text is semantically a refusal / num_samples.",
+    "or_bench_refusal_metrics.incorrect_refusal_rate": "Should-answer examples judged as REFUSE/refusal/evasive non-answer / should_answer_count.",
+    "or_bench_refusal_metrics.unsafe_compliance_rate": "Should-refuse examples judged as harmful compliance / should_refuse_count.",
+    "or_bench_refusal_metrics.behavior_correct_rate": "Teacher-judged behavior_correct decisions / teacher judged OR-BENCH examples."
+  },
+  "by_dataset": {
+    "commonsenseqa": {
+      "num_samples": 107,
+      "action_counts": {
+        "ANSWER": 104,
+        "SEARCH": 3
+      },
+      "action_rates": {
+        "ANSWER": 0.9719626168224299,
+        "SEARCH": 0.028037383177570093,
+        "CALCULATE": 0.0,
+        "CLARIFY": 0.0,
+        "REFUSE": 0.0
+      },
+      "non_answer_action_rate": 0.028037383177570093,
+      "executed_tool_call_count": 3,
+      "executed_tool_call_rate": 0.028037383177570093,
+      "tool_error_count": 0,
+      "tool_error_rate": 0.0,
+      "finalize_parse_failure_count": 1,
+      "finalize_parse_failure_rate": 0.3333333333333333,
+      "final_correct_count": 81,
+      "final_correct_denom": 107,
+      "final_correct_rate": 0.7570093457943925,
+      "final_correct_valid_count": 81,
+      "final_correct_valid_denom": 107,
+      "final_correct_valid_rate": 0.7570093457943925,
+      "final_correct_all_count": 81,
+      "final_correct_all_denom": 107,
+      "final_correct_all_rate": 0.7570093457943925
+    },
+    "gsm8k": {
+      "num_samples": 84,
+      "action_counts": {
+        "ANSWER": 20,
+        "CALCULATE": 64
+      },
+      "action_rates": {
+        "ANSWER": 0.23809523809523808,
+        "SEARCH": 0.0,
+        "CALCULATE": 0.7619047619047619,
+        "CLARIFY": 0.0,
+        "REFUSE": 0.0
+      },
+      "non_answer_action_rate": 0.7619047619047619,
+      "executed_tool_call_count": 64,
+      "executed_tool_call_rate": 0.7619047619047619,
+      "tool_error_count": 0,
+      "tool_error_rate": 0.0,
+      "finalize_parse_failure_count": 0,
+      "finalize_parse_failure_rate": 0.0,
+      "final_correct_count": 62,
+      "final_correct_denom": 84,
+      "final_correct_rate": 0.7380952380952381,
+      "final_correct_valid_count": 62,
+      "final_correct_valid_denom": 84,
+      "final_correct_valid_rate": 0.7380952380952381,
+      "final_correct_all_count": 62,
+      "final_correct_all_denom": 84,
+      "final_correct_all_rate": 0.7380952380952381
+    },
+    "in3": {
+      "num_samples": 96,
+      "action_counts": {
+        "ANSWER": 51,
+        "NONE": 4,
+        "CLARIFY": 41
+      },
+      "action_rates": {
+        "ANSWER": 0.53125,
+        "SEARCH": 0.0,
+        "CALCULATE": 0.0,
+        "CLARIFY": 0.4270833333333333,
+        "REFUSE": 0.0
+      },
+      "non_answer_action_rate": 0.46875,
+      "executed_tool_call_count": 41,
+      "executed_tool_call_rate": 0.4270833333333333,
+      "tool_error_count": 0,
+      "tool_error_rate": 0.0,
+      "finalize_parse_failure_count": 11,
+      "finalize_parse_failure_rate": 0.2682926829268293,
+      "final_correct_count": 52,
+      "final_correct_denom": 92,
+      "final_correct_rate": 0.5652173913043478,
+      "final_correct_valid_count": 52,
+      "final_correct_valid_denom": 92,
+      "final_correct_valid_rate": 0.5652173913043478,
+      "final_correct_all_count": 52,
+      "final_correct_all_denom": 96,
+      "final_correct_all_rate": 0.5416666666666666,
+      "in3_clarify_metrics": {
+        "needs_clarification_count": 71,
+        "no_clarification_needed_count": 25,
+        "clarify_action_count": 41,
+        "clarify_action_rate": 0.4270833333333333,
+        "clarify_when_needed_count": 40,
+        "clarify_when_needed_rate": 0.5633802816901409,
+        "missed_clarification_count": 31,
+        "missed_clarification_rate": 0.43661971830985913,
+        "over_clarification_count": 1,
+        "over_clarification_rate": 0.04,
+        "teacher_clarify_correct_count": 28,
+        "teacher_clarify_correct_denom": 40,
+        "teacher_clarify_correct_rate": 0.7,
+        "overall_clarify_success_rate": 0.39436619718309857,
+        "teacher_judge_count": 96,
+        "teacher_judge_skipped_count": 56,
+        "teacher_judge_error_count": 0
+      }
+    },
+    "math": {
+      "num_samples": 110,
+      "action_counts": {
+        "CALCULATE": 74,
+        "ANSWER": 31,
+        "NONE": 5
+      },
+      "action_rates": {
+        "ANSWER": 0.2818181818181818,
+        "SEARCH": 0.0,
+        "CALCULATE": 0.6727272727272727,
+        "CLARIFY": 0.0,
+        "REFUSE": 0.0
+      },
+      "non_answer_action_rate": 0.7181818181818181,
+      "executed_tool_call_count": 74,
+      "executed_tool_call_rate": 0.6727272727272727,
+      "tool_error_count": 13,
+      "tool_error_rate": 0.17567567567567569,
+      "finalize_parse_failure_count": 3,
+      "finalize_parse_failure_rate": 0.04054054054054054,
+      "final_correct_count": 61,
+      "final_correct_denom": 105,
+      "final_correct_rate": 0.580952380952381,
+      "final_correct_valid_count": 61,
+      "final_correct_valid_denom": 105,
+      "final_correct_valid_rate": 0.580952380952381,
+      "final_correct_all_count": 61,
+      "final_correct_all_denom": 110,
+      "final_correct_all_rate": 0.5545454545454546
+    },
+    "mintqa": {
+      "num_samples": 100,
+      "action_counts": {
+        "SEARCH": 91,
+        "ANSWER": 8,
+        "NONE": 1
+      },
+      "action_rates": {
+        "ANSWER": 0.08,
+        "SEARCH": 0.91,
+        "CALCULATE": 0.0,
+        "CLARIFY": 0.0,
+        "REFUSE": 0.0
+      },
+      "non_answer_action_rate": 0.92,
+      "executed_tool_call_count": 91,
+      "executed_tool_call_rate": 0.91,
+      "tool_error_count": 0,
+      "tool_error_rate": 0.0,
+      "finalize_parse_failure_count": 7,
+      "finalize_parse_failure_rate": 0.07692307692307693,
+      "final_correct_count": 13,
+      "final_correct_denom": 99,
+      "final_correct_rate": 0.13131313131313133,
+      "final_correct_valid_count": 13,
+      "final_correct_valid_denom": 99,
+      "final_correct_valid_rate": 0.13131313131313133,
+      "final_correct_all_count": 13,
+      "final_correct_all_denom": 100,
+      "final_correct_all_rate": 0.13,
+      "mintqa_correctness_source": {
+        "teacher_judged": 92,
+        "machine_fallback": 7,
+        "divergence": 13,
+        "divergence_rate": 0.14130434782608695
+      }
+    },
+    "or_bench": {
+      "num_samples": 106,
+      "action_counts": {
+        "REFUSE": 42,
+        "ANSWER": 64
+      },
+      "action_rates": {
+        "ANSWER": 0.6037735849056604,
+        "SEARCH": 0.0,
+        "CALCULATE": 0.0,
+        "CLARIFY": 0.0,
+        "REFUSE": 0.39622641509433965
+      },
+      "non_answer_action_rate": 0.39622641509433965,
+      "executed_tool_call_count": 0,
+      "executed_tool_call_rate": 0.0,
+      "tool_error_count": 0,
+      "tool_error_rate": null,
+      "finalize_parse_failure_count": 0,
+      "finalize_parse_failure_rate": null,
+      "final_correct_count": 99,
+      "final_correct_denom": 106,
+      "final_correct_rate": 0.9339622641509434,
+      "final_correct_valid_count": 99,
+      "final_correct_valid_denom": 106,
+      "final_correct_valid_rate": 0.9339622641509434,
+      "final_correct_all_count": 99,
+      "final_correct_all_denom": 106,
+      "final_correct_all_rate": 0.9339622641509434,
+      "or_bench_refusal_metrics": {
+        "should_refuse_count": 41,
+        "should_answer_count": 65,
+        "should_refuse_but_answer_schema_count": 3,
+        "should_refuse_but_answer_schema_rate": 0.07317073170731707,
+        "should_answer_but_refuse_schema_count": 4,
+        "should_answer_but_refuse_schema_rate": 0.06153846153846154,
+        "answer_shell_refusal_count": 1,
+        "answer_shell_refusal_rate": 0.009433962264150943,
+        "incorrect_refusal_count": 4,
+        "incorrect_refusal_rate": 0.06153846153846154,
+        "unsafe_compliance_count": 2,
+        "unsafe_compliance_rate": 0.04878048780487805,
+        "behavior_correct_count": 106,
+        "behavior_correct_denom": 106,
+        "behavior_correct_rate": 1.0,
+        "teacher_judge_count": 106,
+        "teacher_judge_skipped_count": 0,
+        "teacher_judge_error_count": 0
+      }
+    }
+  },
+  "action_metrics_existing": {
+    "action_accuracy": 0.9469320066334992,
+    "unnecessary_search_rate": 0.851063829787234,
+    "search_efficiency": {
+      "by_group": {
+        "no_search_expected": {
+          "search_total": 3,
+          "unnecessary_searches": 2,
+          "unnecessary_search_rate": 0.6666666666666666
+        },
+        "tool_needed": {
+          "search_total": 91,
+          "unnecessary_searches": 78,
+          "unnecessary_search_rate": 0.8571428571428571
+        }
+      },
+      "by_dataset": {
+        "commonsenseqa": {
+          "search_total": 3,
+          "unnecessary_searches": 2,
+          "unnecessary_search_rate": 0.6666666666666666
+        },
+        "mintqa": {
+          "search_total": 91,
+          "unnecessary_searches": 78,
+          "unnecessary_search_rate": 0.8571428571428571
+        }
+      }
+    },
+    "calculate_helpfulness": 0.6086956521739131,
+    "clarify_helpfulness": 0.7073170731707317,
+    "justified_refusal_rate": 0.9047619047619048,
+    "over_refusal_rate": 0.09523809523809523,
+    "or_bench_over_refusal_rate": 0.06153846153846154,
+    "or_bench_under_refusal_rate": 0.07317073170731707,
+    "or_bench_refusal_action_accuracy": 0.9339622641509434,
+    "over_answer_rate": 0.0,
+    "non_answer_rate": 0.538971807628524,
+    "expected_utility": 0.2823383084577112,
+    "action_counts": {
+      "ANSWER": 278,
+      "CALCULATE": 138,
+      "NONE": 10,
+      "CLARIFY": 41,
+      "SEARCH": 94,
+      "REFUSE": 42
+    }
+  },
+  "task_metrics_existing": {
+    "overall_exact_match": 0.6205733558178752,
+    "expected_utility": 0.2823383084577112,
+    "clarify_resolution_rate": 0.0,
+    "num_samples": 603,
+    "per_dataset": {
+      "gsm8k": {
+        "exact_match": 0.7380952380952381,
+        "expected_utility": 0.3809523809523814,
+        "over_refusal_rate": null,
+        "under_refusal_rate": null,
+        "refusal_action_accuracy": null,
+        "schema_action_accuracy": null,
+        "behavioral_refusal_accuracy": null,
+        "unsafe_compliance_rate": null,
+        "answer_shell_refusal_rate": null,
+        "num_samples": 84
+      },
+      "in3": {
+        "exact_match": 0.5652173913043478,
+        "expected_utility": 0.06666666666666667,
+        "over_refusal_rate": null,
+        "under_refusal_rate": null,
+        "refusal_action_accuracy": null,
+        "schema_action_accuracy": null,
+        "behavioral_refusal_accuracy": null,
+        "unsafe_compliance_rate": null,
+        "answer_shell_refusal_rate": null,
+        "num_samples": 96
+      },
+      "math": {
+        "exact_match": 0.580952380952381,
+        "expected_utility": 0.268636363636364,
+        "over_refusal_rate": null,
+        "under_refusal_rate": null,
+        "refusal_action_accuracy": null,
+        "schema_action_accuracy": null,
+        "behavioral_refusal_accuracy": null,
+        "unsafe_compliance_rate": null,
+        "answer_shell_refusal_rate": null,
+        "num_samples": 110
+      },
+      "mintqa": {
+        "exact_match": 0.13131313131313133,
+        "expected_utility": -0.24799999999999967,
+        "over_refusal_rate": null,
+        "under_refusal_rate": null,
+        "refusal_action_accuracy": null,
+        "schema_action_accuracy": null,
+        "behavioral_refusal_accuracy": null,
+        "unsafe_compliance_rate": null,
+        "answer_shell_refusal_rate": null,
+        "num_samples": 100
+      },
+      "or_bench": {
+        "exact_match": 0.9339622641509434,
+        "expected_utility": 0.6679245283018866,
+        "over_refusal_rate": 0.06153846153846154,
+        "under_refusal_rate": 0.07317073170731707,
+        "refusal_action_accuracy": 0.9339622641509434,
+        "schema_action_accuracy": 0.9339622641509434,
+        "behavioral_refusal_accuracy": 0.9339622641509434,
+        "unsafe_compliance_rate": 0.07317073170731707,
+        "answer_shell_refusal_rate": 0.0,
+        "num_samples": 106
+      },
+      "commonsenseqa": {
+        "exact_match": 0.7570093457943925,
+        "expected_utility": 0.5261682242990654,
+        "over_refusal_rate": null,
+        "under_refusal_rate": null,
+        "refusal_action_accuracy": null,
+        "schema_action_accuracy": null,
+        "behavioral_refusal_accuracy": null,
+        "unsafe_compliance_rate": null,
+        "answer_shell_refusal_rate": null,
+        "num_samples": 107
+      }
+    }
+  }
+}

@@ -1,0 +1,385 @@
+{
+  "overall": {
+    "num_pairs": 496,
+    "valid_logp_pairs": 496,
+    "chosen_gt_rejected_count": 289,
+    "chosen_gt_rejected_rate": 0.5826612903225806,
+    "logp_margin": {
+      "count": 496,
+      "mean": 4.84929435483871,
+      "p10": -37.0,
+      "p50": 7.5,
+      "p90": 38.25,
+      "min": -115.0,
+      "max": 144.5
+    },
+    "chosen_logp": {
+      "count": 496,
+      "mean": -91.03931451612904,
+      "p10": -130.5,
+      "p50": -84.0,
+      "p90": -60.375,
+      "min": -210.0,
+      "max": -42.75
+    },
+    "rejected_logp": {
+      "count": 496,
+      "mean": -95.88860887096774,
+      "p10": -125.75,
+      "p50": -92.5,
+      "p90": -67.75,
+      "min": -221.0,
+      "max": -46.25
+    },
+    "chosen_mean_logp": {
+      "count": 496,
+      "mean": -1.3227354008339127,
+      "p10": -1.6947648624667258,
+      "p50": -1.3446455505279036,
+      "p90": -0.8984962406015038,
+      "min": -2.247191011235955,
+      "max": -0.36363636363636365
+    },
+    "rejected_mean_logp": {
+      "count": 496,
+      "mean": -1.3609337754960824,
+      "p10": -1.7683104177683764,
+      "p50": -1.3843366778149386,
+      "p90": -0.9272304236200257,
+      "min": -2.280701754385965,
+      "max": -0.38950276243093923
+    },
+    "valid_reward_pairs": 0,
+    "reward_margin_positive_count": 0,
+    "reward_margin_positive_rate": null,
+    "reward_margin": {
+      "count": 0,
+      "mean": null,
+      "p10": null,
+      "p50": null,
+      "p90": null,
+      "min": null,
+      "max": null
+    }
+  },
+  "by_dataset": {
+    "gsm8k": {
+      "num_pairs": 84,
+      "valid_logp_pairs": 84,
+      "chosen_gt_rejected_count": 40,
+      "chosen_gt_rejected_rate": 0.47619047619047616,
+      "logp_margin": {
+        "count": 84,
+        "mean": 0.4107142857142857,
+        "p10": -22.974999999999998,
+        "p50": -1.0,
+        "p90": 22.275000000000002,
+        "min": -49.0,
+        "max": 35.5
+      },
+      "chosen_logp": {
+        "count": 84,
+        "mean": -77.40178571428571,
+        "p10": -97.4,
+        "p50": -76.5,
+        "p90": -58.62499999999999,
+        "min": -137.0,
+        "max": -47.25
+      },
+      "rejected_logp": {
+        "count": 84,
+        "mean": -77.8125,
+        "p10": -93.69999999999999,
+        "p50": -77.5,
+        "p90": -62.04999999999999,
+        "min": -123.5,
+        "max": -46.75
+      },
+      "chosen_mean_logp": {
+        "count": 84,
+        "mean": -1.3326471401363722,
+        "p10": -1.680595744680851,
+        "p50": -1.3609693877551021,
+        "p90": -0.9527765583845478,
+        "min": -2.0434782608695654,
+        "max": -0.7231404958677686
+      },
+      "rejected_mean_logp": {
+        "count": 84,
+        "mean": -1.4431343217613233,
+        "p10": -1.7868197278911566,
+        "p50": -1.4608041329739443,
+        "p90": -1.0415578358208955,
+        "min": -2.0434782608695654,
+        "max": -0.6558441558441559
+      },
+      "valid_reward_pairs": 0,
+      "reward_margin_positive_count": 0,
+      "reward_margin_positive_rate": null,
+      "reward_margin": {
+        "count": 0,
+        "mean": null,
+        "p10": null,
+        "p50": null,
+        "p90": null,
+        "min": null,
+        "max": null
+      }
+    },
+    "in3": {
+      "num_pairs": 96,
+      "valid_logp_pairs": 96,
+      "chosen_gt_rejected_count": 71,
+      "chosen_gt_rejected_rate": 0.7395833333333334,
+      "logp_margin": {
+        "count": 96,
+        "mean": 18.140625,
+        "p10": -32.0,
+        "p50": 17.5,
+        "p90": 55.5,
+        "min": -113.75,
+        "max": 144.5
+      },
+      "chosen_logp": {
+        "count": 96,
+        "mean": -97.24479166666667,
+        "p10": -133.0,
+        "p50": -97.5,
+        "p90": -62.75,
+        "min": -175.0,
+        "max": -51.0
+      },
+      "rejected_logp": {
+        "count": 96,
+        "mean": -115.38541666666667,
+        "p10": -158.5,
+        "p50": -110.5,
+        "p90": -82.75,
+        "min": -221.0,
+        "max": -53.75
+      },
+      "chosen_mean_logp": {
+        "count": 96,
+        "mean": -1.260054354413713,
+        "p10": -1.647839046199702,
+        "p50": -1.2909384014932972,
+        "p90": -0.8241972870879121,
+        "min": -1.9583333333333333,
+        "max": -0.41724137931034483
+      },
+      "rejected_mean_logp": {
+        "count": 96,
+        "mean": -1.2223193888061894,
+        "p10": -1.6708333333333334,
+        "p50": -1.2182539682539684,
+        "p90": -0.8012300810735253,
+        "min": -2.2314814814814814,
+        "max": -0.5059171597633136
+      },
+      "valid_reward_pairs": 0,
+      "reward_margin_positive_count": 0,
+      "reward_margin_positive_rate": null,
+      "reward_margin": {
+        "count": 0,
+        "mean": null,
+        "p10": null,
+        "p50": null,
+        "p90": null,
+        "min": null,
+        "max": null
+      }
+    },
+    "math": {
+      "num_pairs": 110,
+      "valid_logp_pairs": 110,
+      "chosen_gt_rejected_count": 62,
+      "chosen_gt_rejected_rate": 0.5636363636363636,
+      "logp_margin": {
+        "count": 110,
+        "mean": 3.665909090909091,
+        "p10": -29.424999999999997,
+        "p50": 4.5,
+        "p90": 31.550000000000004,
+        "min": -56.5,
+        "max": 70.5
+      },
+      "chosen_logp": {
+        "count": 110,
+        "mean": -84.62954545454545,
+        "p10": -118.55000000000001,
+        "p50": -79.75,
+        "p90": -59.224999999999994,
+        "min": -136.0,
+        "max": -42.75
+      },
+      "rejected_logp": {
+        "count": 110,
+        "mean": -88.29545454545455,
+        "p10": -109.05,
+        "p50": -88.25,
+        "p90": -66.39999999999999,
+        "min": -130.0,
+        "max": -46.25
+      },
+      "chosen_mean_logp": {
+        "count": 110,
+        "mean": -1.2442984170101916,
+        "p10": -1.6964573268921095,
+        "p50": -1.27481884057971,
+        "p90": -0.7380844155844155,
+        "min": -1.9850746268656716,
+        "max": -0.36363636363636365
+      },
+      "rejected_mean_logp": {
+        "count": 110,
+        "mean": -1.358636872309526,
+        "p10": -1.8868577075098814,
+        "p50": -1.4185503685503686,
+        "p90": -0.8298969072164946,
+        "min": -2.196078431372549,
+        "max": -0.38950276243093923
+      },
+      "valid_reward_pairs": 0,
+      "reward_margin_positive_count": 0,
+      "reward_margin_positive_rate": null,
+      "reward_margin": {
+        "count": 0,
+        "mean": null,
+        "p10": null,
+        "p50": null,
+        "p90": null,
+        "min": null,
+        "max": null
+      }
+    },
+    "mintqa": {
+      "num_pairs": 100,
+      "valid_logp_pairs": 100,
+      "chosen_gt_rejected_count": 75,
+      "chosen_gt_rejected_rate": 0.75,
+      "logp_margin": {
+        "count": 100,
+        "mean": 14.8875,
+        "p10": -8.424999999999999,
+        "p50": 18.0,
+        "p90": 38.10000000000001,
+        "min": -38.25,
+        "max": 57.0
+      },
+      "chosen_logp": {
+        "count": 100,
+        "mean": -75.1275,
+        "p10": -92.15,
+        "p50": -75.5,
+        "p90": -58.925,
+        "min": -106.5,
+        "max": -52.75
+      },
+      "rejected_logp": {
+        "count": 100,
+        "mean": -90.015,
+        "p10": -116.55,
+        "p50": -88.75,
+        "p90": -66.0,
+        "min": -130.0,
+        "max": -46.25
+      },
+      "chosen_mean_logp": {
+        "count": 100,
+        "mean": -1.45852476047695,
+        "p10": -1.7477265697494588,
+        "p50": -1.4399038461538463,
+        "p90": -1.1259137983551628,
+        "min": -2.0851063829787235,
+        "max": -0.9482758620689655
+      },
+      "rejected_mean_logp": {
+        "count": 100,
+        "mean": -1.3711658977692165,
+        "p10": -1.6310725893824485,
+        "p50": -1.3987179487179486,
+        "p90": -1.039294884455856,
+        "min": -2.1293103448275863,
+        "max": -0.7738095238095238
+      },
+      "valid_reward_pairs": 0,
+      "reward_margin_positive_count": 0,
+      "reward_margin_positive_rate": null,
+      "reward_margin": {
+        "count": 0,
+        "mean": null,
+        "p10": null,
+        "p50": null,
+        "p90": null,
+        "min": null,
+        "max": null
+      }
+    },
+    "or_bench": {
+      "num_pairs": 106,
+      "valid_logp_pairs": 106,
+      "chosen_gt_rejected_count": 41,
+      "chosen_gt_rejected_rate": 0.3867924528301887,
+      "logp_margin": {
+        "count": 106,
+        "mean": -11.912735849056604,
+        "p10": -66.25,
+        "p50": -6.5,
+        "p90": 36.0,
+        "min": -115.0,
+        "max": 72.5
+      },
+      "chosen_logp": {
+        "count": 106,
+        "mean": -117.88915094339623,
+        "p10": -157.0,
+        "p50": -118.25,
+        "p90": -80.0,
+        "min": -210.0,
+        "max": -60.75
+      },
+      "rejected_logp": {
+        "count": 106,
+        "mean": -105.97641509433963,
+        "p10": -134.5,
+        "p50": -105.25,
+        "p90": -79.5,
+        "min": -181.0,
+        "max": -66.0
+      },
+      "chosen_mean_logp": {
+        "count": 106,
+        "mean": -1.3249422556569148,
+        "p10": -1.6604344729344729,
+        "p50": -1.3117619493908155,
+        "p90": -0.9659154929577465,
+        "min": -2.247191011235955,
+        "max": -0.5915492957746479
+      },
+      "rejected_mean_logp": {
+        "count": 106,
+        "mean": -1.4140619109598365,
+        "p10": -1.7804555084745761,
+        "p50": -1.4214366515837105,
+        "p90": -1.0290476190476192,
+        "min": -2.280701754385965,
+        "max": -0.8177083333333334
+      },
+      "valid_reward_pairs": 0,
+      "reward_margin_positive_count": 0,
+      "reward_margin_positive_rate": null,
+      "reward_margin": {
+        "count": 0,
+        "mean": null,
+        "p10": null,
+        "p50": null,
+        "p90": null,
+        "min": null,
+        "max": null
+      }
+    }
+  },
+  "beta": 0.1,
+  "reference_logp_file": null,
+  "pair_logps": "artifacts/eval_v026_ckpt500_compare_20260527/base_pair_logps_hf/pair_logps.jsonl"
+}

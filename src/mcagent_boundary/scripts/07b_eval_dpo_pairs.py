@@ -58,6 +58,10 @@ METRIC_DEFINITIONS = {
     "final_correct_rate": "Backward-compatible alias for final_correct_valid_rate.",
     "final_correct_valid_rate": "final_correct_valid_count / final_correct_valid_denom. Denominator includes only records with an available correctness signal.",
     "final_correct_all_rate": "final_correct_all_count / final_correct_all_denom. Denominator is all evaluated samples, so parse failures and null natural actions count as failures.",
+    "mintqa_correctness_source.teacher_judged": "MintQA records whose final_correct came from the teacher judge.",
+    "mintqa_correctness_source.machine_fallback": "MintQA records whose final_correct fell back to machine gold-matching because the teacher judge was skipped or errored.",
+    "mintqa_correctness_source.divergence": "MintQA teacher-judged records where the machine gold-match signal disagreed with the teacher verdict.",
+    "mintqa_correctness_source.divergence_rate": "divergence / teacher_judged; a teacher-vs-machine disagreement diagnostic, not an error rate.",
     "in3_clarify_metrics.needs_clarification_count": "IN3 examples with gold clarification information, from gold_clarify_question or missing_details metadata.",
     "in3_clarify_metrics.clarify_when_needed_rate": "CLARIFY decisions on examples that need clarification / needs_clarification_count.",
     "in3_clarify_metrics.missed_clarification_rate": "Non-CLARIFY decisions on examples that need clarification / needs_clarification_count.",
@@ -278,14 +282,16 @@ def _build_raw_policy(config: dict[str, Any], args: argparse.Namespace):
         config["rollout"]["vllm_gpu_memory_utilization"] = args.vllm_gpu_memory_utilization
     if getattr(args, "vllm_max_model_len", None) is not None:
         config["rollout"]["vllm_max_model_len"] = args.vllm_max_model_len
+    elif config.get("eval", {}).get("vllm_max_model_len") is not None:
+        config["rollout"]["vllm_max_model_len"] = config["eval"]["vllm_max_model_len"]
     if getattr(args, "repetition_penalty", None) is not None:
         config["rollout"]["repetition_penalty"] = args.repetition_penalty
     elif config.get("eval", {}).get("repetition_penalty") is not None:
         config["rollout"]["repetition_penalty"] = config["eval"]["repetition_penalty"]
-    prompt_mode = args.prompt_mode or str(config.get("eval", {}).get("prompt_mode", "decision_window"))
-    if prompt_mode == "end_to_end":
-        prompt_mode = "single_action"
-    config.setdefault("rollout", {})["prompt_mode"] = prompt_mode
+    requested_prompt_mode = str(args.prompt_mode or config.get("eval", {}).get("prompt_mode", "decision_window")).lower()
+    actual_prompt_mode = "single_action" if requested_prompt_mode == "end_to_end" else requested_prompt_mode
+    config.setdefault("eval", {})["requested_prompt_mode"] = requested_prompt_mode
+    config.setdefault("rollout", {})["prompt_mode"] = actual_prompt_mode
 
     rollout_cfg = config.get("rollout", {})
     return build_policy(
@@ -1065,6 +1071,42 @@ def _summarize_records(
                     branch.get("final_answer"),
                 )
     teacher_correct_by_key = _judgment_value_by_eval_key(mintqa_judgments, "teacher_correct")
+    # MintQA has explicit string gold, so compute a machine signal too: it gives
+    # an EM fallback when teacher judging is skipped/errors, and lets us report
+    # teacher-vs-machine divergence instead of trusting a single LLM judge.
+    for record in records:
+        if record.get("dataset") == "mintqa" and record.get("gold_answer") is not None:
+            branch = _natural_branch(record)
+            if not branch:
+                continue
+            machine_correct = None
+            if branch.get("final_answer") is not None:
+                machine_correct = is_answer_correct(
+                    {
+                        "gold_answer": record.get("gold_answer"),
+                        "task_type": record.get("task_type") or "factual_boundary",
+                        "dataset": "mintqa",
+                        "metadata": record.get("metadata") or {},
+                    },
+                    branch.get("final_answer"),
+                )
+                branch["machine_correctness"] = machine_correct
+            # Resolve the effective correctness once (teacher preferred, machine
+            # fallback) and write it onto the branch, so BOTH the by_dataset EM
+            # and evaluate_task_metrics() (which reads branch["correctness"])
+            # reflect teacher/multi-hop results instead of the rollout-time
+            # strict machine match that floors MintQA at 0.
+            teacher_value = teacher_correct_by_key.get(_record_eval_key(record))
+            effective = teacher_value if teacher_value is not None else machine_correct
+            if effective is not None:
+                branch["correctness"] = bool(effective)
+            # A multi-hop SEARCH that ultimately produced a correct final answer
+            # is helpful; otherwise unnecessary_search_rate stays at 1.0 even
+            # when search demonstrably led to the right answer.
+            if str(record.get("natural_action") or "").upper() == "SEARCH":
+                if effective is True and (branch.get("observation") or {}).get("results"):
+                    branch["outcome_label_real"] = "SEARCH_helpful"
+    mintqa_correctness_diag = {"teacher_judged": 0, "machine_fallback": 0, "divergence": 0}
     by_dataset: dict[str, dict[str, Any]] = {}
     for dataset in sorted({str(record.get("dataset")) for record in records}):
         subset = [record for record in records if record.get("dataset") == dataset]
@@ -1093,9 +1135,21 @@ def _summarize_records(
             }:
                 finalize_failures += 1
             if dataset == "mintqa":
+                branch = _natural_branch(record)
+                machine_value = branch.get("machine_correctness")
                 if _record_eval_key(record) in teacher_correct_by_key:
+                    teacher_value = bool(teacher_correct_by_key[_record_eval_key(record)])
                     correct_denom += 1
-                    correct += int(teacher_correct_by_key[_record_eval_key(record)])
+                    correct += int(teacher_value)
+                    mintqa_correctness_diag["teacher_judged"] += 1
+                    if machine_value is not None and bool(machine_value) != teacher_value:
+                        mintqa_correctness_diag["divergence"] += 1
+                elif machine_value is not None:
+                    # Teacher skipped/errored: fall back to the machine signal so
+                    # EM stays meaningful instead of collapsing to 0/0.
+                    correct_denom += 1
+                    correct += int(bool(machine_value))
+                    mintqa_correctness_diag["machine_fallback"] += 1
             else:
                 value = branch.get("correctness")
                 if value is not None:
@@ -1126,6 +1180,13 @@ def _summarize_records(
             by_dataset[dataset]["in3_clarify_metrics"] = _summarize_in3(subset, in3_judgments)
         if dataset == "or_bench":
             by_dataset[dataset]["or_bench_refusal_metrics"] = _summarize_or_bench(subset, or_bench_judgments)
+        if dataset == "mintqa":
+            by_dataset[dataset]["mintqa_correctness_source"] = {
+                **mintqa_correctness_diag,
+                "divergence_rate": _rate(
+                    mintqa_correctness_diag["divergence"], mintqa_correctness_diag["teacher_judged"]
+                ),
+            }
     return {
         "num_samples": len(records),
         "metric_definitions": METRIC_DEFINITIONS,
@@ -1185,7 +1246,7 @@ def _summarize_search_usage(records: list[dict[str, Any]]) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate raw model decisions on examples appearing in DPO pair files.")
     parser.add_argument("--pair-files", nargs="+", required=True, help="Train/eval DPO pair JSONL files.")
-    parser.add_argument("--datasets", type=str, default="gsm8k,math,mintqa", help="Comma-separated datasets to evaluate.")
+    parser.add_argument("--datasets", type=str, default="gsm8k,math,mintqa,commonsenseqa", help="Comma-separated datasets to evaluate.")
     parser.add_argument("--output-dir", required=True, help="Directory for eval rollouts and metrics.")
     parser.add_argument("--example-cache-file", action="append", default=[], help="Optional previous rollout JSONL used to recover question/gold/metadata before falling back to raw dataset loaders.")
     parser.add_argument("--backend", choices=["hf", "vllm", "heuristic", "auto"], default=None)
@@ -1198,6 +1259,11 @@ def main() -> None:
     parser.add_argument("--vllm-max-model-len", type=int, default=None)
     parser.add_argument("--repetition-penalty", type=float, default=None, help="vLLM SamplingParams repetition_penalty; useful for reducing prompt echo.")
     parser.add_argument("--tool-finalize-depth", type=int, default=None, help="Post-tool finalize passes; default comes from config and is 1.")
+    parser.add_argument(
+        "--action-decision-only",
+        action="store_true",
+        help="Evaluate first-step action decisions only; do not execute tools or run finalize.",
+    )
     parser.add_argument(
         "--prompt-mode",
         choices=["decision_window", "end_to_end", "single_action"],
@@ -1217,6 +1283,9 @@ def main() -> None:
     config = load_boundary_config()
     if args.tool_finalize_depth is not None:
         config.setdefault("eval", {})["tool_finalize_depth"] = max(1, int(args.tool_finalize_depth))
+    if args.action_decision_only:
+        config.setdefault("eval", {})["execute_tools"] = False
+        config.setdefault("eval", {})["tool_finalize_pass"] = False
     dataset_filter = {item.strip() for item in args.datasets.split(",") if item.strip()}
     pair_paths = [Path(path) for path in args.pair_files]
     pair_records = _load_pair_records(pair_paths, dataset_filter)
@@ -1265,12 +1334,23 @@ def main() -> None:
             raise RuntimeError(f"Could not recover example for pair {pair.get('pair_id')}: {example_id}")
         eval_items.append((pair, examples_by_id[example_id]))
     policy = _build_raw_policy(config, args)
-    eval_prompt_mode = str(config.get("rollout", {}).get("prompt_mode", "decision_window")).lower()
+    actual_rollout_prompt_mode = str(config.get("rollout", {}).get("prompt_mode", "decision_window")).lower()
+    requested_eval_prompt_mode = str(
+        config.get("eval", {}).get("requested_prompt_mode")
+        or args.prompt_mode
+        or config.get("eval", {}).get("prompt_mode", "decision_window")
+    ).lower()
+    eval_task_mode = "decision_only" if actual_rollout_prompt_mode == "decision_window" else "end_to_end"
+    tool_execution_mode = (
+        f"tools_depth_{int(config.get('eval', {}).get('tool_finalize_depth', 1))}"
+        if bool(config.get("eval", {}).get("execute_tools", True))
+        else "first_action_only"
+    )
 
     records: list[dict[str, Any]] = []
     progress = make_progress(eval_items, total=len(eval_items), desc="eval dpo pairs", unit="pair", disable=args.no_progress)
     for pair, example in progress:
-        state_reasoning_attempt = _pair_reasoning_attempt(pair) if eval_prompt_mode == "decision_window" else ""
+        state_reasoning_attempt = _pair_reasoning_attempt(pair) if actual_rollout_prompt_mode == "decision_window" else ""
         record = rollout_one_example(
             example,
             config=config,
@@ -1279,7 +1359,11 @@ def main() -> None:
             reasoning_attempt=state_reasoning_attempt,
         )
         metadata = pair.get("metadata") or {}
-        record["eval_prompt_mode"] = eval_prompt_mode
+        record["eval_task_mode"] = eval_task_mode
+        record["requested_eval_prompt_mode"] = requested_eval_prompt_mode
+        record["actual_rollout_prompt_mode"] = actual_rollout_prompt_mode
+        record["eval_prompt_mode"] = actual_rollout_prompt_mode
+        record["tool_execution_mode"] = tool_execution_mode
         record["state_reasoning_attempt"] = state_reasoning_attempt
         record["eval_pair_id"] = pair.get("pair_id")
         record["pair_chosen_action"] = pair.get("chosen_action")
@@ -1292,7 +1376,8 @@ def main() -> None:
         except Exception:
             pass
 
-    rollout_path = output_dir / "eval_dpo_raw_single_action_rollouts.jsonl"
+    output_stem = f"eval_dpo_{eval_task_mode}"
+    rollout_path = output_dir / f"{output_stem}_rollouts.jsonl"
     write_jsonl(rollout_path, records)
     by_dataset_paths = write_jsonl_by_dataset(rollout_path, records)
 
@@ -1388,10 +1473,16 @@ def main() -> None:
             "search_backend": config.get("tools", {}).get("search", {}).get("eval_backend"),
             "serper_api_key_available": _serper_api_key_available(config),
             "search_usage": search_usage,
+            "eval_execute_tools": bool(config.get("eval", {}).get("execute_tools", True)),
+            "action_decision_only": bool(args.action_decision_only),
             "tool_finalize_depth": int(config.get("eval", {}).get("tool_finalize_depth", 1)),
-            "eval_prompt_mode": eval_prompt_mode,
+            "eval_task_mode": eval_task_mode,
+            "tool_execution_mode": tool_execution_mode,
+            "requested_eval_prompt_mode": requested_eval_prompt_mode,
+            "actual_rollout_prompt_mode": actual_rollout_prompt_mode,
+            "eval_prompt_mode": actual_rollout_prompt_mode,
             "state_conditioned_reasoning_source": "dpo_pair.metadata.state_reasoning_attempt"
-            if eval_prompt_mode == "decision_window"
+            if actual_rollout_prompt_mode == "decision_window"
             else None,
             "calculator_backend": (
                 (config.get("tools", {}).get("calculator", {}) or {}).get(
@@ -1405,7 +1496,7 @@ def main() -> None:
             "pair_logp_metrics": pair_logp_metrics,
         }
     )
-    write_json(output_dir / "eval_dpo_raw_single_action_metrics.json", metrics)
+    write_json(output_dir / f"{output_stem}_metrics.json", metrics)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 

@@ -109,6 +109,26 @@ def _has_real_action_competition(
     return False
 
 
+def _answer_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for candidate in candidates:
+        if str(candidate.get("action", "")).upper() == "ANSWER" and required_input_value(candidate):
+            return candidate
+    return None
+
+
+def _gold_answer_anchor_reason(rollout: dict[str, Any], actions: list[str]) -> str | None:
+    """Return a dataset-gold reason for keeping clear ANSWER anchors."""
+    metadata = dict(rollout.get("metadata") or {})
+    dataset = str(rollout.get("dataset") or metadata.get("dataset") or metadata.get("legacy_dataset") or "").lower()
+    if "ANSWER" not in actions:
+        return None
+    if dataset == "in3" and metadata.get("vague") is False:
+        return "in3_gold_answer"
+    if dataset == "or_bench" and metadata.get("should_refuse") is False and "REFUSE" in actions:
+        return "or_bench_gold_answer_overrefusal_anchor"
+    return None
+
+
 def _dataset_threshold(dataset: str, mining_cfg: dict[str, Any], *, key: str, default_key: str) -> float:
     by_dataset = mining_cfg.get(key) or {}
     if dataset in by_dataset:
@@ -125,12 +145,23 @@ def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]], c
     reasons: list[str] = []
     score = 0.0
 
-    configured_weights = config.get("mining", {}).get("boundary_score_weights", {})
+    # All component weights are read from config so each can be ablated to 0.
+    # Defaults equal the previously hard-coded values, so the default mining
+    # result is unchanged; only an explicit 0 (or override) alters scoring.
+    w = config.get("mining", {}).get("boundary_score_weights", {}) or {}
+
+    def _w(key: str, default: float) -> float:
+        try:
+            return float(w.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    # Process-uncertainty signals (gated by precomputed process_features).
     process_weights = {
-        "LOW_CANDIDATE_LOGPROB_MARGIN": float(configured_weights.get("low_candidate_logprob_margin", 0.15)),
-        "RANK_DISAGREEMENT": float(configured_weights.get("rank_disagreement", 0.10)),
-        "HIGH_SCORE_ENTROPY": float(configured_weights.get("high_score_entropy", 0.10)),
-        "CONFIDENCE_LOGPROB_MISMATCH": float(configured_weights.get("confidence_logprob_mismatch", 0.10)),
+        "LOW_CANDIDATE_LOGPROB_MARGIN": _w("low_candidate_logprob_margin", 0.15),
+        "RANK_DISAGREEMENT": _w("rank_disagreement", 0.10),
+        "HIGH_SCORE_ENTROPY": _w("high_score_entropy", 0.10),
+        "CONFIDENCE_LOGPROB_MISMATCH": _w("confidence_logprob_mismatch", 0.10),
         "HIGH_BRANCHING": 0.04,
         "STRUGGLE_LONG": 0.03,
         "HAS_SELF_REPAIR": 0.03,
@@ -140,25 +171,40 @@ def _boundary_score(rollout: dict[str, Any], candidates: list[dict[str, Any]], c
             score += weight
             reasons.append(feature)
 
+    # Action diversity / competition (was hard-coded 0.15 / 0.08).
+    diversity_w = _w("action_diversity", 0.15)
     if len(actions) >= 3:
-        score += 0.15
+        score += diversity_w
         reasons.append("three_way_action_competition")
     elif len(actions) == 2:
-        score += 0.08
+        score += diversity_w * (0.08 / 0.15)
         reasons.append("two_way_action_competition")
 
+    # Confidence-margin signal (was hard-coded 0.20 / 0.10 / 0.05).
+    margin_w = _w("low_confidence_margin", 0.20)
     if margin is None:
-        score += 0.05
+        score += margin_w * 0.25
         reasons.append("missing_confidence_margin")
     elif margin <= 0.20:
-        score += 0.20
+        score += margin_w
         reasons.append("low_confidence_margin")
     elif margin <= 0.40:
-        score += 0.10
+        score += margin_w * 0.5
         reasons.append("moderate_confidence_margin")
 
+    # u_rel margin signal (previously a dead config key, now wired in additively;
+    # default 0.0 keeps the historical mining result unchanged).
+    u_rel_w = _w("low_u_rel_margin", 0.0)
+    if u_rel_w:
+        u_rel_margin = _u_rel_margin(candidates)
+        if u_rel_margin is not None and u_rel_margin <= 0.20:
+            score += u_rel_w
+            reasons.append("low_u_rel_margin")
+
+    # Semantic pressure (answer-vs-external boundary; was hard-coded 0.20).
+    semantic_w = _w("semantic_pressure", 0.20)
     if _has_non_answer_pressure(natural_action, actions, semantic_tags):
-        score += 0.20
+        score += semantic_w
         reasons.append("answer_external_boundary")
 
     for action in actions:
@@ -313,8 +359,19 @@ def mine_boundary_states(rollouts: list[dict[str, Any]], config: dict[str, Any])
             and "ANSWER" in actions
             and any(action != "ANSWER" for action in actions)
         )
+        gold_answer_anchor_reason = _gold_answer_anchor_reason(rollout_for_pool, actions)
 
-        if (
+        if gold_answer_anchor_reason and _answer_candidate(candidates) is not None:
+            clear_answer.append(
+                {
+                    **enriched,
+                    "pool": "clear_answer_anchor",
+                    "gold_answer_anchor": True,
+                    "gold_answer_anchor_reason": gold_answer_anchor_reason,
+                }
+            )
+            pool_distribution["clear_answer_anchor"] += 1
+        elif (
             stable
             and high_confidence
             and natural_action == "ANSWER"

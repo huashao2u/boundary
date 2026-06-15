@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,14 @@ TEACHER_ERROR_VALUES = ["no_teacher_error", "teacher_error", "unclear"]
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=False)
+
+
+def _display_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return _json_dumps(value)
+    return str(value)
 
 
 def _index_by_state(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -232,7 +241,7 @@ def _label_config_xml() -> str:
   <View className="page">
     <View className="left-panel">
       <View className="block">
-        <Text name="meta" value="Pair: $pair_id | Dataset: $dataset | Boundary: $boundary_type | Pool: $pool"/>
+        <Text name="meta" value="Pair: $pair_id | Split: $pair_split | Dataset: $dataset | Boundary: $boundary_type | Pool: $pool"/>
         <Text name="ids" value="Example: $example_id | State: $state_id"/>
         <Text name="focus" value="Review focus: $review_focus"/>
       </View>
@@ -374,10 +383,22 @@ def _task_from_pair(
     rejected_candidate = _candidate_by_pair_role(rollout, rejected_ev, pair.get("rejected_action", ""))
     pair_id = f"{pair.get('dataset', 'unknown')}-{index:04d}"
     focus = _review_focus(pair, teacher_label)
+    display_metadata = (rollout or {}).get("metadata") or (teacher_label or {}).get("metadata") or {}
+    gold_answer = (rollout or {}).get("gold_answer")
+    if gold_answer is None and isinstance(display_metadata, dict):
+        clarify_question = display_metadata.get("gold_clarify_question")
+        clarify_reply = display_metadata.get("gold_clarify_reply")
+        if clarify_question or clarify_reply:
+            gold_answer = {
+                "gold_clarify_question": clarify_question,
+                "gold_clarify_reply": clarify_reply,
+            }
 
     data = {
         "pair_id": pair_id,
         "review_id": pair_id,
+        "source_pair_id": pair.get("pair_id", ""),
+        "pair_split": pair.get("_review_split", ""),
         "state_id": pair.get("state_id", ""),
         "example_id": pair.get("example_id", ""),
         "dataset": pair.get("dataset", ""),
@@ -385,9 +406,9 @@ def _task_from_pair(
         "pool": pair.get("pool", ""),
         "review_focus": ", ".join(focus) if focus else "general",
         "question": (rollout or {}).get("question") or _question_from_prompt(pair.get("prompt", "")),
-        "gold_answer": (rollout or {}).get("gold_answer", ""),
-        "metadata": (rollout or {}).get("metadata") or (teacher_label or {}).get("metadata") or {},
-        "metadata_json": _json_dumps((rollout or {}).get("metadata") or (teacher_label or {}).get("metadata") or {}),
+        "gold_answer": _display_text(gold_answer),
+        "metadata": display_metadata,
+        "metadata_json": _json_dumps(display_metadata),
         "allowed_actions": (rollout or {}).get("allowed_actions") or [],
         "allowed_actions_json": _json_dumps((rollout or {}).get("allowed_actions") or []),
         "effective_top_k": (rollout or {}).get("effective_top_k", ""),
@@ -427,16 +448,137 @@ def _question_from_prompt(prompt: str) -> str:
     return tail.split("\nAvailable actions:", 1)[0].strip()
 
 
+def _load_pairs_for_review(input_dir: Path, pair_files: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    pairs: list[dict[str, Any]] = []
+    for split, pair_file in pair_files:
+        for row in read_jsonl(input_dir / pair_file):
+            item = dict(row)
+            item["_review_split"] = split
+            item["_review_pair_file"] = pair_file
+            pairs.append(item)
+    return pairs
+
+
+def _stratum_value(pair: dict[str, Any], field: str) -> str:
+    metadata = pair.get("metadata") or {}
+    if field == "split":
+        return str(pair.get("_review_split") or pair.get("split") or metadata.get("split") or "")
+    return str(pair.get(field) or metadata.get(field) or "")
+
+
+def _stratified_sample_pairs(
+    pairs: list[dict[str, Any]],
+    *,
+    sample_size: int | None,
+    sample_seed: int,
+    stratify_by: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    population = len(pairs)
+    if sample_size is None or sample_size <= 0 or sample_size >= population:
+        return list(pairs), {
+            "enabled": False,
+            "population": population,
+            "sample_size": population,
+            "sample_seed": sample_seed,
+            "stratify_by": stratify_by,
+            "reason": "sample_size omitted, non-positive, or >= population",
+        }
+
+    rng = random.Random(sample_seed)
+    groups: dict[tuple[str, ...], list[dict[str, Any]]] = defaultdict(list)
+    for pair in pairs:
+        key = tuple(_stratum_value(pair, field) for field in stratify_by)
+        groups[key].append(pair)
+
+    ideals = {key: (len(rows) / population) * sample_size for key, rows in groups.items()}
+    min_per_stratum = 1 if len(groups) <= sample_size else 0
+    allocations: dict[tuple[str, ...], int] = {
+        key: min(len(groups[key]), max(min_per_stratum, int(ideal)))
+        for key, ideal in ideals.items()
+    }
+
+    while sum(allocations.values()) > sample_size:
+        removable = [key for key, count in allocations.items() if count > min_per_stratum]
+        if not removable:
+            break
+        key = min(
+            removable,
+            key=lambda item: (
+                ideals[item] - allocations[item],
+                allocations[item],
+                tuple(reversed(item)),
+            ),
+        )
+        allocations[key] -= 1
+
+    remainders = sorted(
+        ((ideals[key] - allocations[key], key) for key in groups),
+        key=lambda item: (item[0], item[1]),
+        reverse=True,
+    )
+    while sum(allocations.values()) < sample_size:
+        progressed = False
+        for _, key in remainders:
+            if sum(allocations.values()) >= sample_size:
+                break
+            if allocations[key] >= len(groups[key]):
+                continue
+            allocations[key] += 1
+            progressed = True
+        if not progressed:
+            break
+
+    sampled: list[dict[str, Any]] = []
+    stratum_summary: dict[str, dict[str, int]] = {}
+    for key in sorted(groups):
+        rows = list(groups[key])
+        rows.sort(key=lambda row: str(row.get("pair_id") or row.get("state_id") or row.get("example_id") or ""))
+        count = allocations.get(key, 0)
+        chosen = rng.sample(rows, count) if count < len(rows) else rows
+        chosen.sort(key=lambda row: str(row.get("pair_id") or row.get("state_id") or row.get("example_id") or ""))
+        sampled.extend(chosen)
+        stratum_summary["|".join(key)] = {"population": len(rows), "sampled": len(chosen)}
+
+    sampled.sort(
+        key=lambda row: (
+            str(row.get("_review_split") or ""),
+            str(row.get("dataset") or ""),
+            str(row.get("pair_id") or row.get("state_id") or row.get("example_id") or ""),
+        )
+    )
+    return sampled, {
+        "enabled": True,
+        "population": population,
+        "sample_size": len(sampled),
+        "requested_sample_size": sample_size,
+        "sample_seed": sample_seed,
+        "stratify_by": stratify_by,
+        "num_strata": len(groups),
+        "strata": stratum_summary,
+        "sampled_pair_ids": [str(pair.get("pair_id") or "") for pair in sampled],
+    }
+
+
 def export_label_studio_tasks(
     *,
     input_dir: Path,
     output_dir: Path,
-    pair_file: str,
+    pair_files: list[tuple[str, str]],
     rollout_file: str,
     teacher_label_file: str,
     basename: str,
+    sample_size: int | None = None,
+    sample_seed: int = 20260615,
+    stratify_by: list[str] | None = None,
 ) -> dict[str, Any]:
-    pairs = read_jsonl(input_dir / pair_file)
+    stratify_by = stratify_by or ["split", "dataset", "pair_kind", "chosen_action", "rejected_action"]
+    pairs_all = _load_pairs_for_review(input_dir, pair_files)
+    pairs, sampling = _stratified_sample_pairs(
+        pairs_all,
+        sample_size=sample_size,
+        sample_seed=sample_seed,
+        stratify_by=stratify_by,
+    )
     rollouts = _index_by_state(read_jsonl(input_dir / rollout_file))
     teacher_labels = _index_by_state(read_jsonl(input_dir / teacher_label_file))
 
@@ -452,14 +594,22 @@ def export_label_studio_tasks(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / f"{basename}.json"
+    import_json_path = output_dir / f"{basename}.import.json"
     jsonl_path = output_dir / f"{basename}.jsonl"
     config_path = output_dir / f"{basename}_config.xml"
     summary_path = output_dir / f"{basename}_summary.json"
+    sampling_path = output_dir / f"{basename}_sampling_manifest.json"
 
     json_path.write_text(_json_dumps(tasks) + "\n", encoding="utf-8")
+    import_json_path.write_text(
+        json.dumps(tasks, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
     write_jsonl(jsonl_path, tasks)
     config_path.write_text(_label_config_xml(), encoding="utf-8")
+    sampling_path.write_text(_json_dumps(sampling) + "\n", encoding="utf-8")
 
+    by_split = Counter(str((task.get("data") or {}).get("pair_split", "")) for task in tasks)
     by_dataset = Counter(str((task.get("data") or {}).get("dataset", "")) for task in tasks)
     chosen = Counter(str((task.get("data") or {}).get("chosen_action", "")) for task in tasks)
     rejected = Counter(str((task.get("data") or {}).get("rejected_action", "")) for task in tasks)
@@ -471,14 +621,19 @@ def export_label_studio_tasks(
 
     summary = {
         "num_tasks": len(tasks),
+        "num_population_pairs": len(pairs_all),
         "input_dir": str(input_dir),
-        "pair_file": pair_file,
+        "pair_files": [{"split": split, "path": pair_file} for split, pair_file in pair_files],
         "rollout_file": rollout_file,
         "teacher_label_file": teacher_label_file,
         "label_studio_json": str(json_path),
+        "label_studio_import_json": str(import_json_path),
         "label_studio_jsonl": str(jsonl_path),
         "label_config": str(config_path),
         "summary": str(summary_path),
+        "sampling_manifest": str(sampling_path),
+        "sampling": {key: value for key, value in sampling.items() if key not in {"strata", "sampled_pair_ids"}},
+        "by_split": dict(sorted(by_split.items())),
         "by_dataset": dict(sorted(by_dataset.items())),
         "chosen_action": dict(sorted(chosen.items())),
         "rejected_action": dict(sorted(rejected.items())),
@@ -500,19 +655,30 @@ def main() -> None:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--pair-file", default="train_step_dpo_pairs.jsonl")
+    parser.add_argument("--eval-pair-file", default=None)
     parser.add_argument("--rollout-file", default="all_rollouts.jsonl")
     parser.add_argument("--teacher-label-file", default="teacher_labels_self_evidence.jsonl")
     parser.add_argument("--basename", default="label_studio_v025_pair_review")
+    parser.add_argument("--sample-size", type=int, default=None)
+    parser.add_argument("--sample-seed", type=int, default=20260615)
+    parser.add_argument("--stratify-by", default="split,dataset,pair_kind,chosen_action,rejected_action")
     args = parser.parse_args()
 
     output_dir = args.output_dir or (args.input_dir / "human_review")
+    pair_files = [("train", args.pair_file)]
+    if args.eval_pair_file:
+        pair_files.append(("eval", args.eval_pair_file))
+    stratify_by = [part.strip() for part in args.stratify_by.split(",") if part.strip()]
     summary = export_label_studio_tasks(
         input_dir=args.input_dir,
         output_dir=output_dir,
-        pair_file=args.pair_file,
+        pair_files=pair_files,
         rollout_file=args.rollout_file,
         teacher_label_file=args.teacher_label_file,
         basename=args.basename,
+        sample_size=args.sample_size,
+        sample_seed=args.sample_seed,
+        stratify_by=stratify_by,
     )
     print(_json_dumps(summary))
 

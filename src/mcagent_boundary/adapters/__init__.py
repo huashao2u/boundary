@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from mcagent_boundary.adapters.base import DatasetAdapter, StandardizedExample
+from mcagent_boundary.adapters.commonsenseqa import CommonsenseQAAdapter
 from mcagent_boundary.adapters.freshqa_eval import FreshQAEvalAdapter
 from mcagent_boundary.adapters.gsm8k import GSM8KAdapter
 from mcagent_boundary.adapters.in3 import IN3Adapter
@@ -20,6 +21,7 @@ def build_adapter_registry() -> dict[str, DatasetAdapter]:
         MathAdapter(),
         IN3Adapter(),
         MintQAAdapter(),
+        CommonsenseQAAdapter(),
         ORBenchAdapter(),
         FreshQAEvalAdapter(),
         TruthfulQAEvalAdapter(),

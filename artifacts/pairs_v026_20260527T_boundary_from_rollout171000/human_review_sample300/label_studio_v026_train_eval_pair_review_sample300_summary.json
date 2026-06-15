@@ -1,0 +1,113 @@
+{
+  "num_tasks": 300,
+  "num_population_pairs": 6143,
+  "input_dir": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000",
+  "pair_files": [
+    {
+      "split": "train",
+      "path": "train_step_dpo_pairs.jsonl"
+    },
+    {
+      "split": "eval",
+      "path": "eval_step_dpo_pairs.jsonl"
+    }
+  ],
+  "rollout_file": "../rollout_v026_20260526T171000Z/all_rollouts.jsonl",
+  "teacher_label_file": "teacher_labels.jsonl",
+  "label_studio_json": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000/human_review_sample300/label_studio_v026_train_eval_pair_review_sample300.json",
+  "label_studio_import_json": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000/human_review_sample300/label_studio_v026_train_eval_pair_review_sample300.import.json",
+  "label_studio_jsonl": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000/human_review_sample300/label_studio_v026_train_eval_pair_review_sample300.jsonl",
+  "label_config": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000/human_review_sample300/label_studio_v026_train_eval_pair_review_sample300_config.xml",
+  "summary": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000/human_review_sample300/label_studio_v026_train_eval_pair_review_sample300_summary.json",
+  "sampling_manifest": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000/human_review_sample300/label_studio_v026_train_eval_pair_review_sample300_sampling_manifest.json",
+  "sampling": {
+    "enabled": true,
+    "population": 6143,
+    "sample_size": 300,
+    "requested_sample_size": 300,
+    "sample_seed": 20260615,
+    "stratify_by": [
+      "split",
+      "dataset",
+      "pair_kind",
+      "chosen_action",
+      "rejected_action"
+    ],
+    "num_strata": 36
+  },
+  "by_split": {
+    "eval": 29,
+    "train": 271
+  },
+  "by_dataset": {
+    "commonsenseqa": 56,
+    "gsm8k": 45,
+    "in3": 44,
+    "math": 49,
+    "mintqa": 48,
+    "or_bench": 58
+  },
+  "chosen_action": {
+    "ANSWER": 139,
+    "CALCULATE": 52,
+    "CLARIFY": 33,
+    "REFUSE": 23,
+    "SEARCH": 53
+  },
+  "rejected_action": {
+    "ANSWER": 161,
+    "CALCULATE": 42,
+    "CLARIFY": 11,
+    "REFUSE": 35,
+    "SEARCH": 51
+  },
+  "review_focus": {
+    "CALCULATE rejected": 42,
+    "CLARIFY chosen": 33,
+    "REFUSE chosen": 23,
+    "SEARCH chosen": 53,
+    "answer_is_expression": 46,
+    "general": 111,
+    "gsm8k/math ANSWER chosen": 42,
+    "low_utility_gap": 42
+  },
+  "annotation_fields": {
+    "human_pair_accept": [
+      "accept",
+      "reject",
+      "unclear"
+    ],
+    "teacher_error": [
+      "no_teacher_error",
+      "teacher_error",
+      "unclear"
+    ],
+    "teacher_error_type": [
+      "none",
+      "wrong_answer_payload_high_score",
+      "correct_calculate_low_score",
+      "teacher_ignored_payload",
+      "teacher_rationale_score_conflict",
+      "pairwise_disagreement",
+      "unclear"
+    ],
+    "model_output_error_type": [
+      "none",
+      "answer_contains_clarify",
+      "answer_contains_refusal",
+      "answer_mentions_tool_unavailable",
+      "answer_has_unit",
+      "payload_action_mismatch",
+      "answer_is_expression",
+      "payload_rationale_conflict",
+      "over_refuse",
+      "bad_search_query",
+      "bad_clarify_question",
+      "unsafe_answer_high_score",
+      "answer_shell_refusal",
+      "other_model_output_error",
+      "unclear"
+    ],
+    "notes": "free text"
+  }
+}

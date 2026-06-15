@@ -15,6 +15,7 @@ from mcagent_boundary.annotation.validate_teacher_evidence import (
     safe_eval_expression,
 )
 from mcagent_boundary.adapters.base import StandardizedExample
+from mcagent_boundary.adapters import build_adapter_registry
 from mcagent_boundary.mining.boundary_mining import mine_boundary_states
 from mcagent_boundary.prompting.action_decision import (
     build_decision_window_prompt_text,
@@ -40,6 +41,7 @@ from mcagent_boundary.training.make_dpo_pairs import build_step_dpo_pairs
 from mcagent_boundary.training.run_step_dpo import _weighted_sequence_loss_mean, to_message_dpo_row
 from mcagent_core.features.extract_process_features import extract_process_features
 from mcagent_core.eval.evaluate_answers import is_answer_correct
+from mcagent_core.data.loaders import load_dataset
 from mcagent_core.features.semantic_tags import build_semantic_tag_details_from_state
 from mcagent_core.prompting.build_prompts import parse_candidate_output, parse_decision_output
 from mcagent_core.rollout.policy import PolicyOutput, _parse_finalize_output, _prompt_text_to_messages
@@ -142,7 +144,14 @@ class V02FixTests(unittest.TestCase):
             {"rollout": {"top_k_actions": 3, "candidate_logprob_scoring": {}}},
         )
         self.assertIn("exactly 2 candidates", prompt)
+        self.assertIn("TOP-K ranked candidate set", prompt)
+        self.assertIn("Do not output a root-only single-action object", prompt)
+        self.assertNotIn("Valid rollout-mode output example", prompt)
+        self.assertIn("Good example 1:", prompt)
+        self.assertIn("Good example 2:", prompt)
+        self.assertIn('"candidates": [', prompt)
         self.assertIn("ANSWER, CALCULATE", prompt)
+        self.assertTrue(prompt.rstrip().endswith("Return exactly 2 candidates with different actions. ANSWER must appear."))
         self.assertNotIn("Returning 3 is preferred", prompt)
 
     def test_single_action_eval_prompt_accepts_one_valid_decision(self):
@@ -278,14 +287,15 @@ class V02FixTests(unittest.TestCase):
         messages = _prompt_text_to_messages(prompt)
         system = messages[0]["content"]
         user = messages[1]["content"]
-        self.assertIn("OR-Bench", system)
-        self.assertIn('"action": "ANSWER|REFUSE"', system)
+        self.assertIn("decision-window action selector", system)
+        self.assertNotIn("OR-Bench", system)
+        self.assertIn("`action`: one of ANSWER|REFUSE", system)
         self.assertNotIn("action_input.question", system)
         self.assertNotIn("action_input.query", system)
         self.assertTrue(user.startswith("Question:"))
         self.assertIn("Current allowed actions:", user)
 
-    def test_finalize_after_tool_prompt_is_dataset_specific_and_split(self):
+    def test_finalize_after_tool_prompt_is_task_specific_and_split(self):
         prompt = build_finalize_after_tool_prompt_text(
             dataset="gsm8k",
             question="What is 3*4?",
@@ -296,10 +306,10 @@ class V02FixTests(unittest.TestCase):
         )
         messages = _prompt_text_to_messages(prompt)
         self.assertEqual([message["role"] for message in messages], ["system", "user"])
-        self.assertIn("GSM8K", messages[0]["content"])
-        self.assertIn("Finalize-after-tool guidance for GSM8K", messages[0]["content"])
-        self.assertIn('"action_input": {"answer": "final answer text"}', messages[0]["content"])
-        self.assertIn('"action": "ANSWER|CALCULATE"', messages[0]["content"])
+        self.assertNotIn("GSM8K", messages[0]["content"])
+        self.assertIn("Dataset focus: finalize arithmetic word problems", messages[0]["content"])
+        self.assertIn('ANSWER: {"answer": "final answer text"}', messages[0]["content"])
+        self.assertIn("`final_decision.action`: one of ANSWER|CALCULATE", messages[0]["content"])
         self.assertNotIn("ANSWER|SEARCH|CALCULATE|CLARIFY|REFUSE", prompt)
         self.assertTrue(messages[1]["content"].startswith("Original question:"))
         self.assertIn("Current tool observation:", messages[1]["content"])
@@ -335,7 +345,8 @@ class V02FixTests(unittest.TestCase):
             current_action_input={"query": "Jane Doe occupation"},
             current_observation={"results": ["Jane Doe was a botanist."]},
         )
-        self.assertIn("Finalize-after-tool guidance for MintQA", prompt)
+        self.assertNotIn("MintQA", prompt)
+        self.assertIn("Dataset focus: finalize factual questions", prompt)
         self.assertIn('"action_input": {"answer": "Jane Doe was a botanist and lecturer."}', prompt)
 
     def test_api_judge_summaries_are_keyed_by_eval_pair_id(self):
@@ -823,15 +834,129 @@ class V02FixTests(unittest.TestCase):
         self.assertEqual(calc("x = 3; for i in range(6): x *= 2; x"), "192")
         self.assertEqual(calc("solve(60*(20-x) - 30*x - 660, x)[0]"), "6")
         self.assertEqual(calc("sqrt(16) + expand((x + 1)**2).subs(x, 2)"), "13")
+        self.assertEqual(calc("(2*p) + (p + 1) = 25"), "8")
+        self.assertEqual(calc("f = lambda z: z**2 + 1; f(4)"), "17")
+        self.assertEqual(calc("def f(z):\n    return z**2 + 1\nf(4)"), "17")
+        self.assertEqual(calc("import itertools\nsum(itertools.islice(itertools.count(1), 5))"), "15")
+        self.assertEqual(calc("log(9, 1/3)"), "-2")
+        self.assertEqual(calc("import cmath\nround(abs(1 + cmath.sqrt(3)*1j), 10)"), "2.0")
+        self.assertEqual(
+            calc("(datetime.datetime.strptime('13:00', '%H:%M') - datetime.datetime.strptime('8:00', '%H:%M')).seconds / 3600"),
+            "5.0",
+        )
         self.assertEqual(
             calc('from sympy import symbols, Eq, solve\nx = symbols("x")\nsolve(Eq(60 * (20 - x) - 30 * x, 660), x)[0]'),
             "6",
         )
         self.assertEqual(calc("final_weight = 2 * 3 + 2 * 2 * 2"), "14")
+        self.assertEqual(tool.run({"code": "6 * 7"}, sample={}, history=[])[0]["result"], "42")
+        self.assertEqual(tool.run({"formula": "x + 2*x = 9"}, sample={}, history=[])[0]["result"], "3")
         with self.assertRaises(ValueError):
             calc("import os; os.system('echo nope')")
         with self.assertRaises(ValueError):
             calc("open('/tmp/nope', 'w')")
+
+    def test_commonsenseqa_loader_adapter_prompt_and_answer_evidence(self):
+        dataset_root = Path(__file__).resolve().parents[1] / "dataset"
+        samples = load_dataset("commonsenseqa", split="train", limit=1, dataset_root=dataset_root)
+        self.assertEqual(len(samples), 1)
+        sample = samples[0]
+        self.assertIn("Choices:", sample.question)
+        self.assertIsInstance(sample.gold_answer, list)
+        self.assertIn(sample.metadata["answer_label"], sample.gold_answer)
+        self.assertFalse(sample.metadata["search_required"])
+
+        adapter = build_adapter_registry()["commonsenseqa"]
+        example = adapter.load(dataset_root=dataset_root, split="train", limit=1)[0]
+        self.assertEqual(example.allowed_actions(), ["ANSWER", "SEARCH"])
+        self.assertEqual(example.metadata["boundary_type"], "factual")
+        self.assertTrue(example.metadata["commonsense_answerable"])
+
+        prompt = build_student_prompt(
+            example,
+            {"rollout": {"top_k_actions": 2, "candidate_logprob_scoring": {}, "prompt_mode": "top_k"}},
+        )
+        self.assertIn("Good example 1:", prompt)
+        self.assertIn("ANSWER", prompt)
+        self.assertIn("SEARCH", prompt)
+
+        answer_text = example.metadata["answer_text"]
+        evidence = build_auto_candidate_evidence(
+            {"rank": 1, "action": "ANSWER", "action_input": {"answer": answer_text}},
+            gold_answer=example.gold_answer,
+            dataset="commonsenseqa",
+            metadata=example.metadata,
+        )
+        self.assertTrue(evidence["payload_answer_correct"])
+        self.assertTrue(evidence["auto_payload_answer_correct"])
+        self.assertEqual(evidence["commonsenseqa_answer_match_type"], "text")
+
+        label_answer = example.metadata["answer_label"]
+        wrong_label = next(label for label in ["A", "B", "C", "D", "E"] if label != label_answer)
+        evidence = build_auto_candidate_evidence(
+            {"rank": 1, "action": "ANSWER", "action_input": {"answer": f"{label_answer}. {answer_text}"}},
+            gold_answer=example.gold_answer,
+            dataset="commonsenseqa",
+            metadata=example.metadata,
+        )
+        self.assertTrue(evidence["payload_answer_correct"])
+        self.assertEqual(evidence["commonsenseqa_answer_match_type"], "label")
+
+        evidence = build_auto_candidate_evidence(
+            {"rank": 1, "action": "ANSWER", "action_input": {"answer": f"{wrong_label}. {answer_text}"}},
+            gold_answer=example.gold_answer,
+            dataset="commonsenseqa",
+            metadata=example.metadata,
+        )
+        self.assertFalse(evidence["payload_answer_correct"])
+        self.assertEqual(evidence["commonsenseqa_answer_match_type"], "wrong_label")
+
+        evidence = build_auto_candidate_evidence(
+            {"rank": 1, "action": "ANSWER", "action_input": {"answer": f"{wrong_label}. distractor, {label_answer}. {answer_text}"}},
+            gold_answer=example.gold_answer,
+            dataset="commonsenseqa",
+            metadata=example.metadata,
+        )
+        self.assertFalse(evidence["payload_answer_correct"])
+        self.assertEqual(evidence["commonsenseqa_answer_match_type"], "ambiguous_labels")
+        self.assertTrue(is_answer_correct(example.to_legacy_sample().__dict__, answer_text))
+        self.assertTrue(is_answer_correct(example.to_legacy_sample().__dict__, label_answer))
+        self.assertFalse(is_answer_correct(example.to_legacy_sample().__dict__, f"{wrong_label}. {answer_text}"))
+        self.assertFalse(
+            is_answer_correct(example.to_legacy_sample().__dict__, f"{wrong_label}. distractor, {label_answer}. {answer_text}")
+        )
+
+    def test_commonsenseqa_guardrail_trusts_teacher_answer_correctness(self):
+        metadata = {"answer_label": "C", "answer_text": "garage"}
+        label = {
+            "candidate_evidence": [
+                {
+                    "rank": 1,
+                    "action": "ANSWER",
+                    "payload_answer": "A. office building",
+                    "payload_answer_correct": True,
+                    "payload_semantic_type": "direct_answer",
+                }
+            ],
+            "candidate_utility": [{"rank": 1, "action": "ANSWER", "score": 0.2}],
+        }
+        record = {
+            "dataset": "commonsenseqa",
+            "gold_answer": ["C", "garage", "C. garage", "C: garage"],
+            "metadata": metadata,
+            "candidates": [
+                canonicalize_candidate(
+                    {"rank": 1, "action": "ANSWER", "action_input": {"answer": "A. office building"}}
+                )
+            ],
+        }
+
+        guarded = apply_evidence_score_guardrail(label, dataset="commonsenseqa", record=record)
+        utility = guarded["candidate_utility"][0]
+        evidence = guarded["candidate_evidence"][0]
+        self.assertTrue(evidence["payload_answer_correct"])
+        self.assertEqual(utility["score"], 0.9)
+        self.assertIn("commonsenseqa_answer_correct_score_floored", utility["guardrail_reasons"])
 
     def test_auto_evidence_adds_or_bench_action_and_behavior_correctness(self):
         evidence = build_auto_candidate_evidence(
@@ -1247,6 +1372,74 @@ class V02FixTests(unittest.TestCase):
         best_mid_pairs = [pair for pair in pairs if pair["pair_kind"] == "best_mid"]
         self.assertEqual(len(best_mid_pairs), 1)
         self.assertEqual(best_mid_pairs[0]["dataset"], "in3")
+        self.assertFalse(diagnostics)
+
+    def test_pair_builder_optionally_adds_mintqa_answer_search_supplement(self):
+        answer = canonicalize_candidate(
+            {"rank": 1, "action": "ANSWER", "confidence": 0.7, "action_input": {"answer": "Jane Austen"}}
+        )
+        search = canonicalize_candidate(
+            {"rank": 2, "action": "SEARCH", "confidence": 0.6, "action_input": {"query": "Pride and Prejudice author"}}
+        )
+        refuse = canonicalize_candidate(
+            {"rank": 3, "action": "REFUSE", "confidence": 0.2, "action_input": {"reason": "cannot answer"}}
+        )
+        record = {
+            "state_id": "mintqa-answer-search-augment",
+            "example_id": "mintqa-answer-search-augment",
+            "dataset": "mintqa",
+            "boundary_type": "factual",
+            "question": "Who wrote Pride and Prejudice?",
+            "gold_answer": "Jane Austen",
+            "metadata": {"task_type": "factual_boundary", "can_search": True},
+            "semantic_tags": {},
+            "active_semantic_tags": [],
+            "process_features": {},
+            "candidates": [answer, search, refuse],
+            "branches": [],
+            "diagnostics": [],
+        }
+        teacher_label = {
+            "state_id": "mintqa-answer-search-augment",
+            "source": "llm_teacher",
+            "candidate_evidence": [
+                {"rank": 1, "action": "ANSWER", "payload_answer_correct": True},
+                {"rank": 2, "action": "SEARCH", "query_specific_and_relevant": True},
+                {"rank": 3, "action": "REFUSE"},
+            ],
+            "candidate_utility": [
+                {"rank": 1, "action": "ANSWER", "score": 0.90},
+                {"rank": 2, "action": "SEARCH", "score": 0.80},
+                {"rank": 3, "action": "REFUSE", "score": 0.10},
+            ],
+            "rubric_degenerate": False,
+        }
+        config = {
+            "pair_construction": {
+                "min_utility_gap": 0.5,
+                "require_different_action_types": True,
+                "augmentation": {
+                    "enabled": True,
+                    "mintqa_answer_search": {
+                        "enabled": True,
+                        "max_pairs": 1,
+                        "min_gap": 0.03,
+                        "sample_weight": 0.6,
+                        "require_answer_correct": True,
+                    },
+                },
+            },
+            "datasets": {"eval": []},
+            "scoring": {"action_cost": {}, "semantic_bonus": {}},
+        }
+        train, eval_pairs, diagnostics = build_step_dpo_pairs([record], [teacher_label], config, show_progress=False)
+        pairs = train + eval_pairs
+        supplement = [pair for pair in pairs if pair["pair_kind"] == "mintqa_answer_search"]
+        self.assertEqual(len(supplement), 1)
+        self.assertEqual(supplement[0]["chosen_action"], "ANSWER")
+        self.assertEqual(supplement[0]["rejected_action"], "SEARCH")
+        self.assertEqual(supplement[0]["metadata"]["sample_weight"], 0.6)
+        self.assertEqual(len(pairs), 2)
         self.assertFalse(diagnostics)
 
     def test_pair_builder_post_filters_dataset_action_pair_quota(self):

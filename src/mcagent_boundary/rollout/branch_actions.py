@@ -27,6 +27,7 @@ from mcagent_boundary.features.semantic_tags import infer_semantic_tag_details
 from mcagent_boundary.prompting.action_decision import (
     build_action_decision_prompt_text,
     build_decision_window_prompt_text,
+    build_finalize_after_tool_messages,
     build_finalize_after_tool_prompt_text,
     build_rollout_system_prompt,
 )
@@ -83,19 +84,13 @@ def build_student_prompt(
         allowed_actions=allowed_actions,
         effective_top_k=effective_top_k,
     )
-    tool_list = ", ".join(
-        action.lower() for action in allowed_actions if action != "ANSWER"
-    )
-    allowed_block = "Current allowed actions for this example:\n" + "\n".join(
-        f"- {action}" for action in allowed_actions
-    )
     user_prompt = (
-        f"Question: {example.question}\n\n"
-        f"Constraints:\n"
-        f"- Tools allowed: {tool_list or 'none'}\n"
-        f"- Clarify allowed: {str(example.can_clarify)}"
+        f"Question:\n{example.question}\n\n"
+        f"Available actions:\n"
+        f"{json.dumps(allowed_actions, ensure_ascii=False)}\n\n"
+        f"Return exactly {effective_top_k} candidates with different actions. ANSWER must appear."
     )
-    return system_prompt + "\n\n" + allowed_block + "\n\n" + user_prompt
+    return system_prompt + "\n\n" + user_prompt
 
 
 def _dynamic_student_examples(allowed_actions: list[str]) -> str:
@@ -268,10 +263,30 @@ def _run_finalize_pass(
     *,
     history: list[dict[str, Any]] | None = None,
     trace: list[dict[str, Any]] | None = None,
+    transcript: list[dict[str, Any]] | None = None,
+    force_answer: bool = False,
 ) -> dict[str, Any]:
-    """Run student finalize pass after tool observation (eval only)."""
+    """Run student finalize pass after tool observation (eval only).
+
+    When `transcript` is provided, build a native multi-turn message prompt
+    (system + question + alternating assistant/tool turns) and pass it to the
+    policy via `prompt_messages`. The legacy flat-text path (history/trace
+    JSON-dumped into one user turn) remains as a fallback for policies that
+    only accept `prompt_text`. When `force_answer` is set, the prompt instructs
+    the model to answer from history instead of requesting another tool (used to
+    break degenerate repeated-query loops).
+    """
     try:
         allowed_actions = _allowed_finalize_actions(sample, observation)
+        prompt_messages = None
+        if transcript is not None:
+            prompt_messages = build_finalize_after_tool_messages(
+                question=sample.question,
+                allowed_actions=allowed_actions,
+                transcript=transcript,
+                dataset=str(getattr(sample, "dataset", "")),
+                force_answer=force_answer,
+            )
         full_prompt = build_finalize_after_tool_prompt_text(
             question=sample.question,
             allowed_actions=allowed_actions,
@@ -283,7 +298,13 @@ def _run_finalize_pass(
             dataset=str(getattr(sample, "dataset", "")),
         )
         if hasattr(policy, "finalize_after_tool"):
-            result = policy.finalize_after_tool(sample, candidate, observation, full_prompt)
+            try:
+                result = policy.finalize_after_tool(
+                    sample, candidate, observation, full_prompt, prompt_messages=prompt_messages
+                )
+            except TypeError:
+                # Policy predates the prompt_messages kwarg; use flat text.
+                result = policy.finalize_after_tool(sample, candidate, observation, full_prompt)
         else:
             # DEPRECATED(mainline): eval-only fallback when a policy lacks a
             # finalize method; never used by train-side annotation.
@@ -305,10 +326,24 @@ def _run_finalize_pass(
         return {"final_answer": "", "final_status": "finalize_parse_failed", "finalize_error": str(exc)}
 
 
-def _eval_tool_finalize_depth(config: dict[str, Any]) -> int:
+def _eval_tool_finalize_depth(config: dict[str, Any], dataset: str | None = None) -> int:
+    """Resolve the post-tool finalize depth, optionally per dataset.
+
+    Multi-hop datasets (e.g. MintQA) need several SEARCH->observe->finalize
+    passes to reach an answer; a single hop floors their EM at 0 and pollutes
+    unnecessary_search_rate. `eval.tool_finalize_depth_by_dataset` overrides the
+    scalar `eval.tool_finalize_depth` / `rollout.tool_finalize_depth` for the
+    named dataset.
+    """
     eval_cfg = config.get("eval", {}) or {}
     rollout_cfg = config.get("rollout", {}) or {}
     value = eval_cfg.get("tool_finalize_depth", rollout_cfg.get("tool_finalize_depth", 1))
+    if dataset is not None:
+        by_dataset = eval_cfg.get("tool_finalize_depth_by_dataset") or rollout_cfg.get(
+            "tool_finalize_depth_by_dataset"
+        ) or {}
+        if dataset in by_dataset:
+            value = by_dataset[dataset]
     try:
         return max(1, int(value))
     except (TypeError, ValueError):
@@ -333,8 +368,30 @@ def _run_tool_finalize_loop(
     candidate = dict(initial_candidate)
     observation = initial_observation
     trace: list[dict[str, Any]] = []
+    # Accumulated multi-turn transcript: one entry per executed hop, in
+    # chronological order. Each finalize pass sees the full transcript as
+    # role-alternating assistant/tool turns rather than a JSON-dumped blob.
+    transcript: list[dict[str, Any]] = []
+    # Track (action, normalized-input) of every executed tool hop to detect
+    # degenerate loops where the model keeps requesting the same query.
+    executed_signatures: set[tuple[str, str]] = set()
     final_result: dict[str, Any] = {}
+
+    def _signature(action: str, action_input: dict[str, Any]) -> tuple[str, str]:
+        try:
+            payload = json.dumps(action_input or {}, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            payload = str(action_input)
+        return (str(action).upper(), payload.strip().lower())
+
+    executed_signatures.add(_signature(candidate.get("action", ""), candidate.get("action_input") or {}))
     for step_index in range(max_depth):
+        transcript.append({
+            "action": candidate.get("action"),
+            "action_input": candidate.get("action_input") or {},
+            "brief_rationale": candidate.get("brief_rationale", ""),
+            "observation": observation,
+        })
         final_result = _run_finalize_pass(
             policy,
             sample,
@@ -342,6 +399,7 @@ def _run_tool_finalize_loop(
             observation,
             history=sandbox.history,
             trace=trace,
+            transcript=transcript,
         )
         trace.append({
             "step": step_index + 1,
@@ -360,7 +418,35 @@ def _run_tool_finalize_loop(
         allowed_next_actions = set(_allowed_finalize_actions(sample, observation))
         if next_action not in {"SEARCH", "CALCULATE", "CLARIFY"} or next_action not in allowed_next_actions or not isinstance(next_input, dict):
             break
+        # Degenerate-loop guard: if the model proposes a tool call identical to
+        # one already executed, do not run it again. Instead force a final
+        # answer from the accumulated history and stop.
+        if _signature(next_action, next_input) in executed_signatures:
+            forced = _run_finalize_pass(
+                policy,
+                sample,
+                candidate,
+                observation,
+                history=sandbox.history,
+                trace=trace,
+                transcript=transcript,
+                force_answer=True,
+            )
+            forced.setdefault("final_status", "answered_after_repeat_break")
+            forced["repeated_action_break"] = True
+            forced["repeated_action"] = next_action
+            trace.append({
+                "step": step_index + 1,
+                "action": next_action,
+                "action_input": next_input,
+                "observation": observation,
+                "finalize_result": dict(forced),
+                "note": "repeated_tool_call_forced_answer",
+            })
+            final_result = forced
+            break
         observation, _done, _info = sandbox.step(next_action, next_input)
+        executed_signatures.add(_signature(next_action, next_input))
         candidate = {
             "action": next_action,
             "action_input": next_input,
@@ -501,7 +587,7 @@ def _build_eval_branches(
                 sample=legacy_sample,
                 initial_candidate=candidate,
                 initial_observation=observation,
-                max_depth=_eval_tool_finalize_depth(config),
+                max_depth=_eval_tool_finalize_depth(config, getattr(example, "dataset", None)),
             )
             final_answer = finalize_result.get("final_answer")
             final_status = finalize_result.get("final_status", f"completed_after_{action.lower()}")

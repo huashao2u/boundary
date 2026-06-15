@@ -51,5 +51,7 @@ def evaluate_branch_correctness(example, final_answer: str | None, action: str, 
     sample = {
         "gold_answer": example.gold_answer,
         "task_type": example.task_type,
+        "dataset": example.dataset,
+        "metadata": example.metadata,
     }
     return is_answer_correct(sample, final_answer)

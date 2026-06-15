@@ -583,6 +583,74 @@ def _best_mid_pair_candidate(
     }
 
 
+def _candidate_evidence_bool(
+    teacher_label: dict[str, Any] | None,
+    candidate: dict[str, Any],
+    field: str,
+) -> bool | None:
+    evidence = _candidate_teacher_entry(teacher_label, candidate, field="candidate_evidence")
+    if not isinstance(evidence, dict) or field not in evidence:
+        return None
+    value = evidence.get(field)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0"}:
+            return False
+    return None
+
+
+def _mintqa_answer_search_pair_candidate(
+    record: dict[str, Any],
+    scored: list[dict[str, Any]],
+    teacher_label: dict[str, Any] | None,
+    cfg: dict[str, Any],
+) -> dict[str, Any] | None:
+    if str(record.get("dataset", "")).lower() != "mintqa":
+        return None
+    if bool(teacher_label and teacher_label.get("rubric_degenerate", False)):
+        return None
+
+    answers = [
+        candidate
+        for candidate in scored
+        if candidate["action"] == "ANSWER" and valid_as_chosen(candidate)
+    ]
+    searches = [
+        candidate
+        for candidate in scored
+        if candidate["action"] == "SEARCH" and valid_as_rejected(candidate)
+    ]
+    if not answers or not searches:
+        return None
+
+    chosen = max(answers, key=lambda candidate: candidate["u_rel"])
+    rejected = max(searches, key=lambda candidate: candidate["u_rel"])
+    gap = float(chosen["u_rel"] - rejected["u_rel"])
+    if gap < float(cfg.get("min_gap", 0.03)):
+        return None
+    max_gap = cfg.get("max_gap")
+    if max_gap is not None and gap > float(max_gap):
+        return None
+    if bool(cfg.get("require_answer_correct", True)):
+        answer_correct = _candidate_evidence_bool(teacher_label, chosen, "payload_answer_correct")
+        if answer_correct is not True:
+            return None
+    return {
+        "record": record,
+        "teacher_label": teacher_label,
+        "chosen": chosen,
+        "rejected": rejected,
+        "gap": gap,
+        "tier": "mintqa_answer_search",
+        "sort_gap": gap,
+        "sort_key": _stable_sort_key(record, "mintqa_answer_search"),
+    }
+
+
 def _make_dpo_pair(
     record: dict[str, Any],
     teacher_label: dict[str, Any] | None,
@@ -812,8 +880,10 @@ def build_step_dpo_pairs(
     augmentation_cfg = _pair_augmentation_cfg(config)
     near_tie_cfg = dict(augmentation_cfg.get("near_tie") or {})
     best_mid_cfg = dict(augmentation_cfg.get("best_mid") or {})
+    mintqa_answer_search_cfg = dict(augmentation_cfg.get("mintqa_answer_search") or {})
     near_tie_candidates: list[dict[str, Any]] = []
     best_mid_candidates: list[dict[str, Any]] = []
+    mintqa_answer_search_candidates: list[dict[str, Any]] = []
 
     from mcagent_boundary.progress import make_progress
 
@@ -931,6 +1001,15 @@ def build_step_dpo_pairs(
                 pass
             continue
 
+        mintqa_answer_search = None
+        if pair_augmentation_enabled(config) and bool(mintqa_answer_search_cfg.get("enabled", False)):
+            mintqa_answer_search = _mintqa_answer_search_pair_candidate(
+                record,
+                scored,
+                teacher_label,
+                mintqa_answer_search_cfg,
+            )
+
         chosen_probe = max(
             [candidate for candidate in scored if _pair_candidate_valid_as_chosen(candidate)],
             key=lambda candidate: candidate["u_rel"],
@@ -943,6 +1022,8 @@ def build_step_dpo_pairs(
             require_different_action_types=require_different_action_types,
         )
         if pair is None:
+            if mintqa_answer_search is not None:
+                mintqa_answer_search_candidates.append(mintqa_answer_search)
             if pair_augmentation_enabled(config) and bool(near_tie_cfg.get("enabled", False)):
                 near_tie = _near_tie_pair_candidate(record, scored, teacher_label, near_tie_cfg)
                 if near_tie is not None:
@@ -964,6 +1045,15 @@ def build_step_dpo_pairs(
             continue
 
         chosen_cand, rejected_cand = pair
+        strong_action_pair = f"{chosen_cand['action']}>{rejected_cand['action']}"
+        if (
+            mintqa_answer_search is not None
+            and not (
+                bool(mintqa_answer_search_cfg.get("skip_if_strong_pair_exists", True))
+                and strong_action_pair == "ANSWER>SEARCH"
+            )
+        ):
+            mintqa_answer_search_candidates.append(mintqa_answer_search)
         dpo_pair = _make_dpo_pair(
             record,
             teacher_label,
@@ -1046,6 +1136,32 @@ def build_step_dpo_pairs(
                     pair_kind="best_mid",
                     sample_weight=float(best_mid_cfg.get("sample_weight", 0.7)),
                     augmentation_tier=str(item.get("tier") or "best_mid"),
+                ))
+        if bool(mintqa_answer_search_cfg.get("enabled", False)):
+            mintqa_answer_search_candidates.sort(
+                key=lambda item: (
+                    -float(item["sort_gap"]),
+                    item["sort_key"],
+                )
+            )
+            max_pairs = int(mintqa_answer_search_cfg.get("max_pairs", 0))
+            selected_mintqa_answer_search = _select_augmented_candidates(
+                mintqa_answer_search_candidates,
+                max_pairs=max_pairs,
+                dataset_quota={"mintqa": max_pairs},
+                fill_remaining=False,
+            )
+            for item in selected_mintqa_answer_search:
+                augmented_pairs.append(_make_dpo_pair(
+                    item["record"],
+                    item["teacher_label"],
+                    config,
+                    item["chosen"],
+                    item["rejected"],
+                    min_utility_gap=float(item["gap"]),
+                    pair_kind="mintqa_answer_search",
+                    sample_weight=float(mintqa_answer_search_cfg.get("sample_weight", 0.6)),
+                    augmentation_tier=str(item.get("tier") or "mintqa_answer_search"),
                 ))
         for dpo_pair in augmented_pairs:
             if _assign_split(dpo_pair, eval_datasets) == "eval":

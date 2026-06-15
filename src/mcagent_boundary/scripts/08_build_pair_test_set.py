@@ -200,11 +200,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260517)
     parser.add_argument("--gsm8k-n", type=int, default=500)
     parser.add_argument("--mintqa-n", type=int, default=500)
+    parser.add_argument("--commonsenseqa-n", type=int, default=500)
     parser.add_argument("--math-n", type=int, default=500)
     parser.add_argument("--or-bench-n", type=int, default=800)
-    parser.add_argument("--or-benign-n", type=int, default=480)
-    parser.add_argument("--or-hard-n", type=int, default=160)
-    parser.add_argument("--or-toxic-n", type=int, default=160)
+    parser.add_argument("--or-benign-n", type=int, default=500)
+    parser.add_argument("--or-hard-n", type=int, default=250)
+    parser.add_argument("--or-toxic-n", type=int, default=50)
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -220,12 +221,17 @@ def main() -> None:
 
     gsm8k_test = _load_examples(config, "gsm8k", split="test")
     mintqa_test = _load_mintqa_sample(config, split="test", n=args.mintqa_n, rng=rng)
+    commonsenseqa_test = _load_examples(config, "commonsenseqa", split="validation")
     in3_test = _load_examples(config, "in3", split="test")
     math_all = _load_examples(config, "math", split="train")
     or_all = _load_examples(config, "or_bench", split="train")
 
     gsm8k_selected = _sample(gsm8k_test, args.gsm8k_n, rng)
     mintqa_selected = list(mintqa_test)
+    commonsenseqa_pool = [
+        item for item in commonsenseqa_test if item.example_id not in rollout_ids and item.example_id not in pair_ids
+    ]
+    commonsenseqa_selected = _sample(commonsenseqa_pool, args.commonsenseqa_n, rng)
     in3_selected = list(in3_test)
     math_pool = [item for item in math_all if item.example_id not in rollout_ids and item.example_id not in pair_ids]
     math_selected, math_summary = _sample_math_by_level(math_pool, args.math_n, rng)
@@ -262,6 +268,9 @@ def main() -> None:
     records_by_dataset = {
         "gsm8k": [_as_record(item, test_source="official_test") for item in gsm8k_selected],
         "mintqa": [_as_record(item, test_source="official_test") for item in mintqa_selected],
+        "commonsenseqa": [
+            _as_record(item, test_source="validation_not_in_rollout_or_pairs") for item in commonsenseqa_selected
+        ],
         "in3": [_as_record(item, test_source="official_test_all") for item in in3_selected],
         "math": [_as_record(item, test_source="train_not_in_rollout_level_balanced") for item in math_selected],
         "or_bench": [
@@ -276,7 +285,11 @@ def main() -> None:
             for item in or_selected[: args.or_bench_n]
         ],
     }
-    all_records = [record for dataset in ("gsm8k", "mintqa", "in3", "math", "or_bench") for record in records_by_dataset[dataset]]
+    all_records = [
+        record
+        for dataset in ("gsm8k", "mintqa", "commonsenseqa", "in3", "math", "or_bench")
+        for record in records_by_dataset[dataset]
+    ]
 
     write_jsonl(output_dir / "pair_test_examples.jsonl", all_records)
     for dataset, records in records_by_dataset.items():

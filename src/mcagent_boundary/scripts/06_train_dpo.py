@@ -34,9 +34,82 @@ def main() -> None:
         default=None,
         help="Override DPO checkpoint output dir. Defaults to paths.dpo_output_dir.",
     )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Override training.max_steps for this run.",
+    )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=None,
+        help="Override training.max_length for this run.",
+    )
+    parser.add_argument(
+        "--rpo-alpha",
+        type=float,
+        default=None,
+        help=(
+            "Add a chosen-NLL anchor (rRPO/RPO style) to the DPO loss. The total loss "
+            "becomes sigmoid_dpo + rpo_alpha * mean_token_NLL(chosen). 0 disables it. "
+            "Recommended 0.5-1.0 to mitigate chosen logp drift in long-epoch DPO."
+        ),
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=None,
+        help=(
+            "Override training.beta (DPO inverse-temperature / implicit KL strength). "
+            "Larger beta = sharper preference gradient AND stronger KL pull toward the "
+            "reference, so the policy drifts less from base."
+        ),
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=None,
+        help=(
+            "Override training.gradient_accumulation_steps. Use this to keep the global "
+            "batch (per_device * grad_accum * nproc_per_node) constant when changing the "
+            "number of GPUs, e.g. 2-card runs should halve it from the single-card value."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Override training.seed (passed to DPOConfig). Changes data shuffling order and "
+            "init RNG, so different seeds give genuinely different runs for multi-seed variance."
+        ),
+    )
+    parser.add_argument(
+        "--no-sample-weights",
+        action="store_true",
+        help=(
+            "Ablation: force training.use_sample_weights=false (uniform weight). Proves the gain "
+            "is not from hand-tuned strong/near_tie/best_mid sample weights. Does not edit the yaml."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_boundary_config()
+    if args.max_steps is not None:
+        config.setdefault("training", {})["max_steps"] = int(args.max_steps)
+    if args.max_length is not None:
+        config.setdefault("training", {})["max_length"] = int(args.max_length)
+    if args.rpo_alpha is not None:
+        config.setdefault("training", {})["rpo_alpha"] = float(args.rpo_alpha)
+    if args.beta is not None:
+        config.setdefault("training", {})["beta"] = float(args.beta)
+    if args.gradient_accumulation_steps is not None:
+        config.setdefault("training", {})["gradient_accumulation_steps"] = int(args.gradient_accumulation_steps)
+    if args.seed is not None:
+        config.setdefault("training", {})["seed"] = int(args.seed)
+    if args.no_sample_weights:
+        config.setdefault("training", {})["use_sample_weights"] = False
     train_pair_path = (
         Path(args.train_pair_file).resolve()
         if args.train_pair_file

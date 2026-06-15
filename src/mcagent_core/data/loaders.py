@@ -245,6 +245,59 @@ def _load_mintqa(dataset_root: Path, split: str, limit: int | None) -> list[Unif
     return samples
 
 
+def _load_commonsenseqa(dataset_root: Path, split: str, limit: int | None) -> list[UnifiedSample]:
+    split_aliases = {
+        "dev": "validation",
+        "valid": "validation",
+        "val": "validation",
+    }
+    target_split = split_aliases.get(split, split)
+    jsonl_path = dataset_root / "commonsenseqa" / f"{target_split}.jsonl"
+    rows = _read_jsonl(jsonl_path, limit=limit)
+    samples: list[UnifiedSample] = []
+    for index, row in enumerate(rows):
+        choices = row.get("choices") or {}
+        labels = [str(item) for item in choices.get("label", [])]
+        texts = [str(item) for item in choices.get("text", [])]
+        answer_key = str(row.get("answerKey") or "").strip()
+        label_to_text = {label: text for label, text in zip(labels, texts)}
+        answer_text = label_to_text.get(answer_key)
+        choice_lines = [f"{label}. {text}" for label, text in zip(labels, texts)]
+        question = str(row["question"]).strip()
+        if choice_lines:
+            question = question + "\n\nChoices:\n" + "\n".join(choice_lines)
+        gold_answer: list[str] | None
+        if answer_key and answer_text:
+            gold_answer = [answer_key, answer_text, f"{answer_key}. {answer_text}", f"{answer_key}: {answer_text}"]
+        elif answer_text:
+            gold_answer = [answer_text]
+        elif answer_key:
+            gold_answer = [answer_key]
+        else:
+            gold_answer = None
+        samples.append(
+            UnifiedSample(
+                id=f"commonsenseqa-{target_split}-{index}",
+                dataset="commonsenseqa",
+                question=question,
+                gold_answer=gold_answer,
+                metadata={
+                    "split": target_split,
+                    "source_id": row.get("id"),
+                    "question_concept": row.get("question_concept"),
+                    "choices": [{"label": label, "text": text} for label, text in zip(labels, texts)],
+                    "answer_label": answer_key or None,
+                    "answer_text": answer_text,
+                    "search_required": False,
+                    "commonsense_answerable": True,
+                    "knowledge_type": "commonsense",
+                },
+                task_type="factual_boundary",
+            )
+        )
+    return samples
+
+
 def _load_or_bench(dataset_root: Path, split: str, limit: int | None) -> list[UnifiedSample]:
     del split  # OR-Bench ships train CSVs only.
     pd = _require_pandas()
@@ -308,6 +361,9 @@ DATASET_LOADERS = {
     "freshqa": _load_freshqa,
     "in3": _load_in3,
     "mintqa": _load_mintqa,
+    "commonsenseqa": _load_commonsenseqa,
+    "commonsense_qa": _load_commonsenseqa,
+    "csqa": _load_commonsenseqa,
     "or_bench": _load_or_bench,
     "or-bench": _load_or_bench,
 }

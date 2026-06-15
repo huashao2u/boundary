@@ -18,9 +18,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Mine boundary states from existing student rollouts.")
     parser.add_argument("--input-dir", type=str, default=None, help="Directory containing all_rollouts.jsonl.")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for mining outputs.")
+    parser.add_argument(
+        "--zero-boundary-weight",
+        action="append",
+        default=[],
+        metavar="WEIGHT_KEY",
+        help=(
+            "Ablation: set the named mining.boundary_score_weights key to 0 for this run "
+            "(repeatable). Keys: low_candidate_logprob_margin, rank_disagreement, "
+            "high_score_entropy, confidence_logprob_mismatch, action_diversity, "
+            "low_confidence_margin, semantic_pressure, low_u_rel_margin. Does not edit the yaml."
+        ),
+    )
     args = parser.parse_args()
 
     config = load_boundary_config()
+    if args.zero_boundary_weight:
+        weights = dict(config.setdefault("mining", {}).get("boundary_score_weights", {}) or {})
+        for key in args.zero_boundary_weight:
+            weights[key] = 0.0
+        config["mining"]["boundary_score_weights"] = weights
 
     def _path(name: str, override_dir: str | None) -> Path:
         base = resolve_repo_path(config["paths"][name], config)

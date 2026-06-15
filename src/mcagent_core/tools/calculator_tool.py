@@ -49,7 +49,20 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 _PYTHON_SANDBOX_DEFAULT_TIMEOUT_SEC = 3.0
 _PYTHON_SANDBOX_DEFAULT_MEMORY_MB = 512
 _PYTHON_SANDBOX_OUTPUT_MAX_CHARS = 512
-_PYTHON_SANDBOX_ALLOWED_IMPORTS = {"math", "sympy", "fractions", "decimal"}
+_PYTHON_SANDBOX_ALLOWED_IMPORTS = {
+    "collections",
+    "cmath",
+    "decimal",
+    "datetime",
+    "fractions",
+    "functools",
+    "itertools",
+    "math",
+    "numpy",
+    "statistics",
+    "sympy",
+    "_strptime",
+}
 _PYTHON_SANDBOX_FORBIDDEN_NAMES = {
     "__import__",
     "breakpoint",
@@ -434,88 +447,22 @@ def _python_sandbox_validate_import(node: ast.Import | ast.ImportFrom) -> None:
 
 
 def _python_sandbox_validate_ast(tree: ast.AST) -> None:
-    allowed_nodes = (
-        ast.Module,
-        ast.Import,
-        ast.ImportFrom,
-        ast.alias,
-        ast.Assign,
-        ast.AugAssign,
-        ast.Expr,
-        ast.For,
-        ast.While,
-        ast.If,
-        ast.Break,
-        ast.Continue,
-        ast.Pass,
-        ast.BinOp,
-        ast.UnaryOp,
-        ast.BoolOp,
-        ast.Compare,
-        ast.Call,
-        ast.keyword,
-        ast.Name,
-        ast.Load,
-        ast.Store,
-        ast.Del,
-        ast.Constant,
-        ast.Attribute,
-        ast.Subscript,
-        ast.Slice,
-        ast.List,
-        ast.Tuple,
-        ast.Set,
-        ast.Dict,
-        ast.ListComp,
-        ast.SetComp,
-        ast.DictComp,
-        ast.GeneratorExp,
-        ast.comprehension,
-        ast.IfExp,
-        ast.NamedExpr,
-        ast.Add,
-        ast.Sub,
-        ast.Mult,
-        ast.Div,
-        ast.FloorDiv,
-        ast.Pow,
-        ast.Mod,
-        ast.MatMult,
-        ast.USub,
-        ast.UAdd,
-        ast.Not,
-        ast.And,
-        ast.Or,
-        ast.Eq,
-        ast.NotEq,
-        ast.Lt,
-        ast.LtE,
-        ast.Gt,
-        ast.GtE,
-        ast.Is,
-        ast.IsNot,
-        ast.In,
-        ast.NotIn,
-    )
     forbidden_nodes = (
         ast.AsyncFor,
         ast.AsyncFunctionDef,
         ast.Await,
         ast.ClassDef,
         ast.Delete,
-        ast.FunctionDef,
         ast.Global,
-        ast.Lambda,
         ast.Nonlocal,
         ast.Raise,
-        ast.Try,
         ast.With,
         ast.AsyncWith,
         ast.Yield,
         ast.YieldFrom,
     )
     for node in ast.walk(tree):
-        if isinstance(node, forbidden_nodes) or not isinstance(node, allowed_nodes):
+        if isinstance(node, forbidden_nodes):
             raise ValueError(f"Unsupported calculator sandbox syntax: {type(node).__name__}")
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             _python_sandbox_validate_import(node)
@@ -553,7 +500,14 @@ def _python_sandbox_prepare_code(expression: str) -> str:
     expression = _normalize_python_snippet(expression)
     if not expression or len(expression) > 4000 or "__" in expression:
         raise ValueError("Unsupported calculator sandbox expression.")
-    tree = ast.parse(expression, mode="exec")
+    try:
+        tree = ast.parse(expression, mode="exec")
+    except SyntaxError as exc:
+        try:
+            symbolic_result = evaluate_expression(expression)
+        except Exception:
+            raise exc
+        return f"print({str(_format_result(symbolic_result))!r})"
     _python_sandbox_validate_ast(tree)
     if tree.body:
         last = tree.body[-1]
@@ -583,9 +537,30 @@ def _python_sandbox_prepare_code(expression: str) -> str:
     return ast.unparse(tree)
 
 
+def _extract_calculator_expression(action_input: Any) -> str:
+    if isinstance(action_input, str):
+        return action_input.strip()
+    if not isinstance(action_input, dict):
+        return str(action_input).strip()
+
+    for key in ("expression", "expr", "code", "python", "formula", "calculation", "input", "query"):
+        value = action_input.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+
+    if len(action_input) == 1:
+        value = next(iter(action_input.values()))
+        if value is not None and str(value).strip():
+            return str(value).strip()
+
+    return ""
+
+
 def _python_sandbox_child_source() -> str:
     return r'''
 import contextlib
+import cmath
+import datetime
 import io
 import json
 import math
@@ -604,7 +579,7 @@ try:
 except Exception:
     pass
 
-allowed_roots = {"math", "sympy", "fractions", "decimal"}
+allowed_roots = {"collections", "cmath", "datetime", "decimal", "fractions", "functools", "itertools", "math", "numpy", "statistics", "sympy", "_strptime"}
 
 def sandbox_import(name, globals=None, locals=None, fromlist=(), level=0):
     if level:
@@ -616,37 +591,83 @@ def sandbox_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 safe_builtins = {
     "__import__": sandbox_import,
+    "ArithmeticError": ArithmeticError,
+    "Exception": Exception,
+    "ValueError": ValueError,
     "abs": abs,
     "all": all,
     "any": any,
     "bool": bool,
+    "complex": complex,
     "dict": dict,
+    "divmod": divmod,
     "enumerate": enumerate,
+    "filter": filter,
     "float": float,
+    "format": format,
     "int": int,
     "len": len,
     "list": list,
+    "map": map,
     "max": max,
     "min": min,
     "pow": pow,
     "print": print,
     "range": range,
+    "reversed": reversed,
     "round": round,
     "set": set,
+    "slice": slice,
     "sorted": sorted,
     "str": str,
     "sum": sum,
     "tuple": tuple,
+    "type": type,
     "zip": zip,
 }
 
 import sympy as sp
-from sympy import Eq, expand, factor, simplify, solve, sqrt, symbols
+from sympy import Abs, Eq, Matrix, Rational, expand, factor, simplify, solve, sqrt, symbols
+
+def sandbox_log(value, base=None):
+    try:
+        if base is None:
+            numeric = math.log(float(value))
+        else:
+            numeric = math.log(float(value), float(base))
+        rounded = round(numeric)
+        return rounded if abs(numeric - rounded) < 1e-12 else numeric
+    except Exception:
+        if base is None:
+            return sp.log(value)
+        return sp.simplify(sp.log(value) / sp.log(base))
 
 single_letter_symbols = {chr(code): sp.Symbol(chr(code)) for code in range(ord("a"), ord("z") + 1)}
 safe_globals = {
     "__builtins__": safe_builtins,
+    "Abs": Abs,
+    "E": sp.E,
+    "I": sp.I,
+    "Matrix": Matrix,
+    "Rational": Rational,
+    "acos": sp.acos,
+    "asin": sp.asin,
+    "atan": sp.atan,
+    "ceil": sp.ceiling,
+    "ceiling": sp.ceiling,
+    "cmath": cmath,
+    "comb": math.comb,
+    "cos": sp.cos,
+    "datetime": datetime,
     "math": math,
+    "floor": sp.floor,
+    "gcd": math.gcd,
+    "lcm": math.lcm,
+    "ln": sandbox_log,
+    "log": sandbox_log,
+    "oo": sp.oo,
+    "perm": math.perm,
+    "pi": sp.pi,
     "sp": sp,
     "sympy": sp,
     "Eq": Eq,
@@ -732,9 +753,9 @@ class CalculatorTool:
         self.output_max_chars = output_max_chars
 
     def run(self, action_input: dict[str, Any], sample, history: list[dict[str, Any]]) -> tuple[dict[str, Any], bool, dict[str, Any]]:
-        expression = str(action_input.get("expression", "")).strip()
+        expression = _extract_calculator_expression(action_input)
         if not expression:
-            raise ValueError("CalculatorTool requires `expression`.")
+            raise ValueError("CalculatorTool requires an expression/code payload.")
         if self.backend == "python_sandbox":
             result = evaluate_expression_python_sandbox(
                 expression,

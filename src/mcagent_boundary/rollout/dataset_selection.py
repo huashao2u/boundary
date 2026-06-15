@@ -130,6 +130,8 @@ def apply_selection_preset(examples: list[Any], preset: str | None) -> list[Any]
                 else:
                     other.append(item)
             selected_by_dataset[dataset] = _take_first(benign, 4000) + hard + toxic + other
+        elif dataset == "commonsenseqa":
+            selected_by_dataset[dataset] = _take_first(items, 2000)
         elif dataset in {"mintqa", "in3"}:
             selected_by_dataset[dataset] = list(items)
         else:

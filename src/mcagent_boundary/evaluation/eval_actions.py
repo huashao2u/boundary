@@ -7,6 +7,48 @@ def _safe_rate(numerator: int, denominator: int) -> float | None:
     return None if denominator == 0 else numerator / denominator
 
 
+# Datasets where an external SEARCH is structurally expected (tool-needed) vs.
+# datasets the model should answer/refuse/calculate without web search. The
+# global unnecessary_search_rate mixes these, so a per-group breakdown is the
+# only interpretable view: e.g. a multi-hop QA set whose harness floors single
+# searches as "unhelpful" should not be read as the model searching wastefully.
+_TOOL_NEEDED_DATASETS = {"mintqa"}
+_NO_SEARCH_DATASETS = {"commonsenseqa", "gsm8k", "math", "in3", "or_bench"}
+
+
+def _search_efficiency_by_group(rollouts: list[dict[str, Any]]) -> dict[str, Any]:
+    groups: dict[str, dict[str, int]] = {}
+    per_dataset: dict[str, dict[str, int]] = {}
+    for record in rollouts:
+        natural_action_raw = record.get("natural_action")
+        natural_action = str(natural_action_raw).upper() if natural_action_raw is not None else None
+        if natural_action != "SEARCH":
+            continue
+        natural_branch = record.get("natural_branch_real") or record.get("natural_branch") or {}
+        unhelpful = int(natural_branch.get("outcome_label_real") != "SEARCH_helpful")
+        dataset = str(record.get("dataset") or (record.get("metadata") or {}).get("dataset") or "unknown")
+        if dataset in _TOOL_NEEDED_DATASETS:
+            group = "tool_needed"
+        elif dataset in _NO_SEARCH_DATASETS:
+            group = "no_search_expected"
+        else:
+            group = "other"
+        for bucket, key in ((groups, group), (per_dataset, dataset)):
+            slot = bucket.setdefault(key, {"search_total": 0, "unnecessary": 0})
+            slot["search_total"] += 1
+            slot["unnecessary"] += unhelpful
+    def _summ(d: dict[str, dict[str, int]]) -> dict[str, Any]:
+        return {
+            k: {
+                "search_total": v["search_total"],
+                "unnecessary_searches": v["unnecessary"],
+                "unnecessary_search_rate": _safe_rate(v["unnecessary"], v["search_total"]),
+            }
+            for k, v in sorted(d.items())
+        }
+    return {"by_group": _summ(groups), "by_dataset": _summ(per_dataset)}
+
+
 def evaluate_actions(rollouts: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rollouts)
     action_counts: dict[str, int] = {}
@@ -69,6 +111,7 @@ def evaluate_actions(rollouts: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "action_accuracy": _safe_rate(action_correct, total),
         "unnecessary_search_rate": _safe_rate(unnecessary_searches, search_total),
+        "search_efficiency": _search_efficiency_by_group(rollouts),
         "calculate_helpfulness": _safe_rate(helpful_calculates, calculate_total),
         "clarify_helpfulness": _safe_rate(helpful_clarifies, clarify_total),
         "justified_refusal_rate": _safe_rate(justified_refuses, refuse_total),

@@ -22,7 +22,10 @@ def _resolve_search_config(runtime_config: dict[str, Any] | None) -> dict[str, A
     if runtime_config is None:
         return {}
     if "tools" in runtime_config:
-        return runtime_config.get("tools", {}).get("search", {})
+        cfg = dict(runtime_config.get("tools", {}).get("search", {}) or {})
+        if runtime_config.get("_repo_root") is not None:
+            cfg.setdefault("_repo_root", runtime_config["_repo_root"])
+        return cfg
     return runtime_config
 
 

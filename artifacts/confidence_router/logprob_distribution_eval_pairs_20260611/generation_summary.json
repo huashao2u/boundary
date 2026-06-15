@@ -1,0 +1,35 @@
+{
+  "pair_file": "artifacts/pairs_v026_20260527T_boundary_from_rollout171000/eval_step_dpo_pairs.jsonl",
+  "generation_file": "artifacts/confidence_router/logprob_distribution_eval_pairs_20260611/router_generations.jsonl",
+  "model_path": "models/Qwen2.5-7B-Instruct",
+  "backend": "vllm",
+  "device": "vllm",
+  "dtype": "float16",
+  "max_new_tokens": 256,
+  "example_summary": {
+    "num_examples": 603,
+    "by_dataset": {
+      "commonsenseqa": 107,
+      "gsm8k": 84,
+      "in3": 96,
+      "math": 110,
+      "mintqa": 100,
+      "or_bench": 106
+    },
+    "by_oracle_action": {
+      "ANSWER": 279,
+      "CALCULATE": 97,
+      "CLARIFY": 72,
+      "REFUSE": 41,
+      "SEARCH": 114
+    },
+    "by_allowed_actions": {
+      "ANSWER,CALCULATE": 194,
+      "ANSWER,CLARIFY": 96,
+      "ANSWER,REFUSE": 106,
+      "ANSWER,SEARCH": 207
+    }
+  },
+  "num_generations": 603,
+  "parse_ok_rate": 0.9535655058043118
+}

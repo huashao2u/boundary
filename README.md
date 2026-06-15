@@ -151,7 +151,8 @@ process uncertainty 诊断信号。boundary / anchor 挖掘已拆到 `02b_mine_b
 - `--datasets a,b,c`：覆盖训练数据集列表；默认使用 `rollout.yaml` 中的 `datasets.train`。
 - `--limit-per-dataset N`：每个数据集最多 rollout N 条。
 - `--full-dataset`：忽略 `rollout.limit_per_dataset`，读取全量。
-- `--selection-preset {none,v023_full_rollout,v026_full_rollout}`：应用命名采样方案。`v026_full_rollout`
+- `--selection-preset {none,v023_full_rollout,v026_full_rollout}`：应用命名采样方案，默认
+  `v026_full_rollout`。`v026_full_rollout`
   保持 GSM8K 3k、OR-Bench benign 4k + hard/toxic 全量、MintQA/IN3 全量，并在 MATH 3k 中偏向
   `level<=3`，同时保留一部分 `level4/5`。
 - `--fixed-example-ids PATH`：只对固定 `example_id` 列表执行小规模实验；支持一行一个 id、
@@ -300,7 +301,7 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evi
   `lower utility` / `rejected` / `worse` 等显式负面 marker。
 - pair 选择仍来自 top-k rollout candidates，但 DPO 样本默认采用
   `decision_window`（state-conditioned action alignment）：prompt 使用专用的
-  `student_decision_window.md`、题目、允许动作和 rollout 中 student 原始 `reasoning_attempt`
+  `prompts/decision_window/{dataset}.md`、题目、允许动作和 rollout 中 student 原始 `reasoning_attempt`
   作为固定 state；completion 只补全根级 action JSON
   `{action, confidence, brief_rationale, action_input}`。训练样本只到 action emission，不执行
   search/calculator/clarify/refuse 工具，也不包含 tool observation/finalize。
@@ -313,6 +314,10 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evi
     best-vs-middle pair，默认 `sample_weight=0.70`；配额只保留 IN3
     (`in3:1000`) 且 `fill_remaining=false`，避免 MintQA best-mid 继续强化
     `SEARCH > ANSWER`。
+  - `mintqa_answer_search`：可选补充项，默认关闭。启用后只在 MintQA 中选择
+    teacher evidence 显示 `ANSWER` payload 正确、且 `ANSWER` 的 `U_rel` 高于 `SEARCH`
+    的样本，构造 `ANSWER>SEARCH` pair；默认 `min_gap=0.03`、`max_pairs=300`、
+    `sample_weight=0.60`。这用于有意识地补充“稳定已知事实直接答，不必搜索”的信号。
   这些 pair 会在顶层和 `metadata` 中记录 `pair_kind`、`sample_weight`、`pair_id` 和
   `augmentation_tier`，便于后续训练加权或分组分析。
 - 默认还会执行 pair-level post-filter：MintQA 小桶全部保留，主导的 search-heavy 桶限制为
@@ -341,6 +346,11 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/03b_relabel_teacher_self_evi
 - `--batch-size N`：流式批处理构建 pair，降低大规模构建时的峰值内存。
 - `--prompt-mode decision_window|end_to_end`：覆盖 DPO prompt/completion 格式；默认
   `decision_window`。
+- `--enable-mintqa-answer-search`：启用可选 MintQA `ANSWER>SEARCH` 补充 pair。
+- `--disable-mintqa-answer-search`：关闭 MintQA `ANSWER>SEARCH` 补充，覆盖配置。
+- `--mintqa-answer-search-max-pairs N`：覆盖补充 pair 上限。
+- `--mintqa-answer-search-min-gap X`：覆盖 `ANSWER` 相对 `SEARCH` 的最小 `U_rel` gap。
+- `--mintqa-answer-search-sample-weight X`：覆盖补充 pair 的 `sample_weight`。
 - `--no-progress`：关闭进度条。
 
 示例：
@@ -351,6 +361,17 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
   --output-dir artifacts_v02_vllm_200_strict \
   --teacher-label-file teacher_labels_self_evidence.jsonl \
   --require-configured-teacher-source
+```
+
+如需补充 MintQA `ANSWER>SEARCH` 信号：
+
+```bash
+PYTHONPATH=src python3 src/mcagent_boundary/scripts/04_make_pairs.py \
+  --input-dir artifacts_v02_vllm_200_strict \
+  --output-dir artifacts_v02_vllm_200_strict \
+  --teacher-label-file teacher_labels_self_evidence.jsonl \
+  --require-configured-teacher-source \
+  --enable-mintqa-answer-search
 ```
 
 ### `04b_balance_pairs.py`
@@ -397,18 +418,34 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/05_optional_warmup.py --run-
 参数：
 
 - `--smoke`：最多截取少量 pair，并使用 `training.smoke_max_steps`。
+- `--train-pair-file` / `--eval-pair-file`：覆盖 train/eval pair JSONL 路径。
+- `--output-dir`：覆盖 checkpoint 输出目录。
+- `--max-steps` / `--max-length`：覆盖 `training.max_steps` / `training.max_length`。
+- `--rpo-alpha`：chosen-NLL anchor 系数（RPO/rRPO），loss = sigmoid_dpo +
+  rpo_alpha * mean_token_NLL(chosen)；0 关闭，建议 0.5-1.0 抑制 chosen logp 漂移。
+- `--beta`：覆盖 `training.beta`（DPO 逆温度 / 隐式 KL 强度）。
+- `--gradient-accumulation-steps`：覆盖 `training.gradient_accumulation_steps`，用于换卡数时
+  保持全局 batch 不变。
+
+这些 CLI 覆盖项写入 `config["training"]` 后由 DPOConfig 在启动时一次性读入，进程启动后即可改回
+配置文件而不影响在跑的训练。
 
 ```bash
 PYTHONPATH=src python3 src/mcagent_boundary/scripts/06_train_dpo.py --smoke
+
+# 4 卡、beta=0.25、grad_accum=4（保持全局 batch=16）、训到 320 步
+CUDA_VISIBLE_DEVICES=0,1,4,5 PYTHONPATH=src torchrun --nproc_per_node=4 --master_port=29521 \
+  src/mcagent_boundary/scripts/06_train_dpo.py \
+  --beta 0.25 --rpo-alpha 0.5 --gradient-accumulation-steps 4 --max-steps 320 \
+  --output-dir artifacts/checkpoints/step_dpo_v026_beta025
 ```
 
 ### `07_eval.py`
 
-读取 `datasets.eval`，执行 eval-side rollout 和动作/任务/校准指标。默认使用
-`decision_window`，即与 DPO 主线一致：题目 + 允许动作 + 原始 `reasoning_attempt` state -> action
-decision。该模式使用专用 root-only action prompt，避免与 end-to-end 的
-`{reasoning, decision}` schema 冲突。端到端 single-action eval 可显式传
-`--prompt-mode end_to_end` / `single_action`。
+读取 `datasets.eval`，执行 eval-side rollout 和动作/任务/校准指标。脚本默认
+`--prompt-mode single_action`，即题目 + 允许动作 -> `{reasoning, decision}`。
+如需与 DPO 主线一致的 decision-window eval，请使用 `07b_eval_dpo_pairs.py`
+或对应脚本显式传入支持的 decision-window 模式。
 当前 `rollout.yaml` 中 eval 数据集为空；TruthfulQA / RealTimeQA adapter 只是未来扩展 hook。
 
 ```bash
@@ -439,7 +476,7 @@ PYTHONPATH=src python3 src/mcagent_boundary/scripts/07_eval.py --limit-per-datas
 - `src/mcagent_boundary/mining/boundary_mining.py`
   - `_legacy_utility_pool()`：兼容旧 rollout 的 utility 字段，当前 v0.2 主干不走。
 - `src/mcagent_core/prompting/build_prompts.py`
-  - top-k parser 仍用于 02 rollout/mining；single-decision parser 用于 `student_action_decision.md` 的
+  - top-k parser 仍用于 02 rollout/mining；single-decision parser 用于 `prompts/action_decision/{dataset}.md` 的
     DPO/eval schema。
 - `src/mcagent_boundary/rollout/branch_actions.py`
   - heuristic finalize fallback：eval-only，不参与训练侧 boundary mining / pair construction。
@@ -515,3 +552,82 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 PYTHONPATH=src torchrun --nproc_per_node=4 \
 多卡训练的全局 batch 约等于
 `per_device_train_batch_size * gradient_accumulation_steps * nproc_per_node`。换卡数时如需保持相同
 全局 batch，应相应调低 `gradient_accumulation_steps` 或 `per_device_train_batch_size`。
+
+## 变更记录：评测多轮 finalize、搜索效率、teacher 标注有效性、训练 CLI
+
+本节记录对主干代码的一批修正，按主题分组。涉及多轮工具评测、搜索效率指标、MintQA
+正确性来源、teacher 自证据答案有效性，以及训练 CLI 超参覆盖。
+
+### 评测端多轮 finalize（`branch_actions.py`、`action_decision.py`、`policy.py`、`rollout.yaml`）
+
+- **按数据集配置 finalize 深度**：`eval.tool_finalize_depth_by_dataset` 覆盖标量
+  `eval.tool_finalize_depth`。当前默认 `commonsenseqa/or_bench/in3=1`（单步或
+  CLARIFY 终结动作，无工具链）、`gsm8k/math=3`（允许短计算链）、`mintqa=5`（3-4 跳实体
+  QA）。`branch_actions._eval_tool_finalize_depth(config, dataset)` 解析该覆盖。
+- **多轮 finalize 改为原生多轮消息**：`build_finalize_after_tool_messages()` 生成
+  `system + 原问题(user) + 每跳(assistant action JSON + tool observation) + 收尾(user)`
+  的角色交替消息，替代旧的“把全部 history/trace JSON-dump 进单条 user”的两轮设计。
+  `tool` 角色由 Qwen2.5 chat template 原生渲染为 `<tool_response>`，多跳注意力对齐更接近
+  底座模型的工具使用分布。旧 flat-text 路径保留为不支持 `prompt_messages` 的 policy 的回退。
+- **observation 压缩**：`compact_observation()` 对每跳 observation 保留 status/answer/result
+  与 top-N 检索片段（默认 top-3、每段 ≤600 字符），避免深度 finalize 时上下文无界增长；
+  配合 `eval.vllm_max_model_len` 提升到 12288。
+- **policy 接口**：`HFLocalPolicy` / `VLLMLocalPolicy` / `HeuristicPolicy` 的
+  `finalize_after_tool()` 新增 `prompt_messages` 形参；提供时用 `apply_chat_template`
+  喂多轮消息，否则回退 flat prompt。
+- **重复工具调用打断（degenerate-loop guard）**：`_run_tool_finalize_loop` 跟踪已执行工具
+  调用的 `(action, 规范化 input)` 签名；当模型再次提议与历史完全相同的工具调用时，不再执行，
+  改为以 `force_answer` 指令跑一次 finalize（要求基于历史直接作答）并停止。结果标记
+  `repeated_action_break=True`，避免多跳题在重复 query 上空耗深度且永不作答。
+
+### 搜索效率分组与 MintQA 正确性来源（`eval_actions.py`、`07b_eval_dpo_pairs.py`）
+
+- **分组搜索效率**：`evaluate_actions()` 新增 `search_efficiency`，把全局
+  `unnecessary_search_rate` 拆成 `tool_needed`（mintqa）/ `no_search_expected`
+  （commonsenseqa/gsm8k/math/in3/or_bench）/ `other` 三组并附 per-dataset。全局平均会被
+  MintQA（多跳、单跳 harness 判不出 helpful）污染，分组视图才可解释。
+- **MintQA 正确性：teacher 优先 + 机器兜底 + 双轨诊断**：`_summarize_records` 对 MintQA
+  每条用 `is_answer_correct`（list-gold 匹配）算机器信号，并把“teacher 优先、缺失/报错时机器
+  兜底”的 effective correctness 写回 `branch["correctness"]`，使 `by_dataset` EM 与
+  `evaluate_task_metrics`（读 `branch["correctness"]`）一致——此前两处分别得到 0.14 与 0.0。
+  `--skip-mintqa-teacher-judge` 时 EM 不再塌成 0/0。新增 `mintqa_correctness_source`
+  诊断：`teacher_judged` / `machine_fallback` / `divergence` / `divergence_rate`
+  （teacher 与机器分歧率，评测可靠性指标）。
+- **多跳 SEARCH 归因**：若一次 SEARCH 最终导向正确答案（teacher 或机器）且有检索结果，
+  将其 `outcome_label_real` 重标为 `SEARCH_helpful`；否则 `unnecessary_search_rate`
+  会在搜索确实帮答对时仍恒为 1.0。
+
+### teacher 自证据答案有效性（`validate_teacher_evidence.py`）
+
+修正一批会污染训练 pair 标注的判定漏洞：
+
+- **文本匹配子串假阳性**：`_text_answer_matches_gold` 对短 gold（≤6 字符）要求词边界匹配
+  （“art” 不再命中 “start”），并对被否定词（not/no/rather than… 回看 3 词窗口）修饰的命中判否
+  （“not a farmer but a teacher” 对 gold=farmer 判 False）。
+- **数学“无法提取数值”≠“答错”**：math 数据集仅当答案与 gold 都能取到数值时才判对/错；提取失败
+  （`\frac`、`\sqrt`、区间、`x=` 等符号形式）返回 `None`（未知），guardrail 不再对其施加
+  wrong-answer cap。
+- **数值提取改进**：`extract_final_numeric_answer` 优先抓“answer is/=/:”等显式标记后的数字
+  （避免抓到末尾无关数字），并对 LaTeX/符号/区间形式直接返回 None。
+- **数值容差比较**：新增 `_numbers_match`（`math.isclose`），CALCULATE 的
+  `expression_matches_gold` 与 math ANSWER 比较改用容差（`2/3` 匹配 `0.6667`），非数值回退精确
+  字符串比较。
+- **should_refuse 单一来源**：`_should_refuse_from_metadata`（显式值优先，缺失回退
+  `or_bench_label ∈ {hard,toxic}`）被 auto-evidence、guardrail、`classify_payload_semantic_type`
+  统一调用，消除 `action_correctness` 与 guardrail `refuse_bool` 的口径分歧。
+- **CSQA 多 label 消歧**：`_final_commonsenseqa_label` 在出现多个选项标签时取显式 answer 标记或
+  剔除被否定的标签（“B, not A” 取 B），不再一律判 ambiguous。
+- **refusal 误判收紧**：强拒答短语（“i can't”等）全文命中即判；弱线索（sorry/refuse）仅在开头且
+  非叙述性致歉（“sorry for the confusion, the answer is…”不算）时才判拒答。
+
+### 训练 CLI 超参覆盖（`06_train_dpo.py`）
+
+新增两个命令行覆盖项，免去为改超参临时编辑 `dpo.yaml`：
+
+- `--beta`：覆盖 `training.beta`（DPO 逆温度 / 隐式 KL 强度）。beta 越大，preference 梯度越锐，
+  且对 reference 的 KL 拉力越强（策略更不易漂离底座）。
+- `--gradient-accumulation-steps`：覆盖 `training.gradient_accumulation_steps`，换卡数时用来保持
+  全局 batch（`per_device * grad_accum * nproc_per_node`）不变，例如 2 卡应取单卡值的一半。
+
+与既有的 `--rpo-alpha` / `--max-steps` / `--max-length` 一致，写入 `config["training"]` 后由
+DPOConfig 在训练启动时一次性读入；进程启动后即可改回配置文件，不影响在跑的训练。

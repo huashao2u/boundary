@@ -6,11 +6,26 @@ from pathlib import Path
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from mcagent_core.rollout.policy import _model_assets_available
+
+
+def _resolve_path(config: dict, path_value: str) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (Path(config.get("_repo_root", ".")) / path).resolve()
+
 
 def resolve_model_path(config: dict) -> str:
-    student_cfg = config["student"]
-    env_name = str(student_cfg["model_path_env"])
-    return os.environ.get(env_name, str(config["paths"]["model_root"]))
+    student_cfg = config.get("student", {})
+    env_name = str(student_cfg.get("model_path_env", "STUDENT_MODEL_PATH"))
+    if os.environ.get(env_name):
+        return str(_resolve_path(config, os.environ[env_name]))
+    if student_cfg.get("fallback_model_path"):
+        fallback = _resolve_path(config, str(student_cfg["fallback_model_path"]))
+        if _model_assets_available(str(fallback)):
+            return str(fallback)
+    return str(_resolve_path(config, str(config["paths"]["model_root"])))
 
 
 def load_model_and_tokenizer(config: dict):
@@ -45,4 +60,6 @@ def load_model_and_tokenizer(config: dict):
             task_type="CAUSAL_LM",
         )
         model = get_peft_model(model, peft_config)
+        if bool(config["training"].get("gradient_checkpointing", True)) and hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
     return model, tokenizer

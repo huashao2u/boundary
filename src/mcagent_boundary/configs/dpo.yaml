@@ -26,33 +26,49 @@ mining:
   boundary_threshold_by_dataset:
     gsm8k: 0.55
     math: 0.50
-    in3: 0.45
-    mintqa: 0.55
-    or_bench: 0.45
+    in3: 0.40
+    mintqa: 0.60
+    commonsenseqa: 0.45
+    or_bench: 0.35
   competition_window: 0.35
   anchor_margin: 0.5
-  max_boundary_candidates: 9000
-  max_clear_answer_anchors: 740
+  max_boundary_candidates: 15000
+  max_clear_answer_anchors: 1800
   max_clear_external_anchors: 260
   sampling:
     redistribute_unused: true
+    boundary_redistribute_unused: false
     boundary_quota_by_dataset:
       gsm8k: 2000
       math: 2000
-      in3: 1100
+      in3: all
       mintqa: 3000
-      or_bench: 900
+      commonsenseqa: 1600
+      or_bench: 450
+    boundary_quota_by_dataset_label:
+      or_bench:
+        toxic: 450
+        hard: all
+        benign: 100
     clear_answer_quota_by_dataset:
       gsm8k: 20
       math: 40
-      in3: 40
+      in3: all
       mintqa: 0
-      or_bench: 640
+      commonsenseqa: 1200
+      or_bench: 1200
+    clear_answer_quota_by_dataset_label:
+      in3:
+        vague_false: all
+      or_bench:
+        hard: 800
+        benign: 400
     clear_external_quota_by_dataset:
       gsm8k: 25
       math: 25
       in3: 25
       mintqa: 75
+      commonsenseqa: 0
       or_bench: 110
   soft_boundary_from_other:
     enabled: false
@@ -62,15 +78,24 @@ mining:
       math: 0.45
       in3: 0.40
       mintqa: 0.45
+      commonsenseqa: 0.35
       or_bench: 0.35
   boundary_score_weights:
-    low_u_rel_margin: 0.25
-    action_diversity: 0.15
+    # Each weight is read by mining.boundary_mining._boundary_score and can be
+    # set to 0 to ablate that signal. Defaults below reproduce the historical
+    # (pre-parameterization) mining behavior exactly:
+    #   - action_diversity 0.15 (3-way) / 0.08 (2-way, scaled)
+    #   - low_confidence_margin 0.20 (<=0.20) / 0.10 (<=0.40) / 0.05 (missing)
+    #   - semantic_pressure 0.20 (answer-vs-external boundary)
+    #   - low_u_rel_margin 0.0 (inactive in the historical pool; raise to enable)
     low_candidate_logprob_margin: 0.15
     rank_disagreement: 0.10
     high_score_entropy: 0.10
     confidence_logprob_mismatch: 0.10
-    semantic_pressure: 0.15
+    action_diversity: 0.15
+    low_confidence_margin: 0.20
+    semantic_pressure: 0.20
+    low_u_rel_margin: 0.0
 
 warmup:
   enable_if_non_answer_rate_below: 0.15
@@ -78,22 +103,34 @@ warmup:
   max_examples: 1000
 
 training:
-  beta: 0.1
-  per_device_train_batch_size: 4
+  beta: 0.15
+  # chosen-NLL anchor (rRPO/RPO style): loss = sigmoid_dpo + rpo_alpha * mean_token_NLL(chosen).
+  # 0.5 produced planA-a05-s240 (the selected ckpt); 0.0 disables it (pure standard DPO).
+  # CLI --rpo-alpha still overrides this when passed.
+  rpo_alpha: 0.5
+  per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 16
   learning_rate: 5.0e-6
-  num_train_epochs: 1
-  max_steps: 200
-  eval_steps: 25
-  save_steps: 50
+  num_train_epochs: 8
+  max_steps: 320
+  eval_steps: 20
+  save_steps: 20
+  min_save_steps: 140
+  save_total_limit: 20
   logging_steps: 5
   warmup_steps: 10
-  max_length: 1024
+  # Current decision-window prompts include dataset-specific system rules.
+  # 1024 truncates all GSM8K/MATH prompts and many OR-Bench completions.
+  # The 800-step run that produced ckpt-225/275/500 used 1792, which fit on 24G 3090s.
+  # 2048 OOMs at backward on this hardware; keep at 1792 unless GPU mem grows.
+  max_length: 1792
   truncation_mode: keep_end
   bf16: false
   fp16: true
   gradient_checkpointing: true
+  precompute_ref_log_probs: true
+  precompute_ref_batch_size: 1
   ddp_find_unused_parameters: false
   smoke_max_steps: 2
   report_to: []

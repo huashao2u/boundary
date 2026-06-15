@@ -59,6 +59,7 @@ def main() -> None:
 
     config = load_boundary_config()
     config.setdefault("rollout", {})["backend"] = args.backend
+    config.setdefault("eval", {})["requested_prompt_mode"] = "end_to_end"
     config["rollout"]["prompt_mode"] = "single_action"
     config["rollout"]["candidate_temperature"] = args.candidate_temperature
     config["rollout"]["max_new_tokens"] = args.max_new_tokens
@@ -77,6 +78,11 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     rollout_path = output_dir / "eval_test_end_to_end_rollouts.jsonl"
+    tool_execution_mode = (
+        f"tools_depth_{int(config.get('eval', {}).get('tool_finalize_depth', 1))}"
+        if bool(config.get("eval", {}).get("execute_tools", True))
+        else "first_action_only"
+    )
 
     records: list[dict[str, Any]] = []
     completed_ids: set[str] = set()
@@ -93,8 +99,11 @@ def main() -> None:
         iterator = make_progress(todo, total=len(todo), desc="eval test examples", unit="sample", disable=args.no_progress)
         for example in iterator:
             record = rollout_one_example(example, config=config, phase="eval", policy=policy)
+            record["eval_task_mode"] = "end_to_end"
+            record["requested_eval_prompt_mode"] = "end_to_end"
             record["eval_prompt_mode"] = "end_to_end"
             record["actual_rollout_prompt_mode"] = "single_action"
+            record["tool_execution_mode"] = tool_execution_mode
             records.append(record)
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             handle.flush()
@@ -158,6 +167,9 @@ def main() -> None:
             "search_backend": config.get("tools", {}).get("search", {}).get("eval_backend"),
             "serper_api_key_available": pair_eval._serper_api_key_available(config),
             "tool_finalize_depth": int(config.get("eval", {}).get("tool_finalize_depth", 1)),
+            "eval_task_mode": "end_to_end",
+            "tool_execution_mode": tool_execution_mode,
+            "requested_eval_prompt_mode": "end_to_end",
             "eval_prompt_mode": "end_to_end",
             "actual_rollout_prompt_mode": "single_action",
             "calculator_backend": (
